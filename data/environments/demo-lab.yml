@@ -1,0 +1,16 @@
+environment:
+  name: "demo-lab"
+
+  proxmox:
+    api_host: "192.168.99.12"
+    default_node: "poseidon"
+
+    sections:
+      jlong-cyba3:
+        proxmox_node: "poseidon"
+        vnet: "t101c213"
+        subnet: "10.101.213.0/24"
+        gateway: "10.101.213.1"
+        dhcp_start: "10.101.213.100"
+        dhcp_end: "10.101.213.199"
+

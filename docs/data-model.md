@@ -93,7 +93,7 @@ sections:
   jlong-cyba3:
     display_section: "cyba3"
     alias: "Cybersecurity - A3"
-    teacher_owner: "jlong"
+    teacher: "jlong"
 
     course_code: "cyb"
     course_name: "Cybersecurity"
