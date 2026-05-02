@@ -1,0 +1,61 @@
+- name: Create Proxmox users with pveum
+  hosts: pve1
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    generated_students: "{{ lookup('file', generated_students_file) | from_yaml }}"
+    sections_data: "{{ lookup('file', sections_file) | from_yaml }}"
+    proxmox_realm: "pve"
+
+  tasks:
+    - name: Ensure generated student users exist
+      shell: |
+        set -e
+        USERID="{{ item.username }}@{{ proxmox_realm }}"
+
+        if sudo -n /usr/sbin/pveum user list | grep -Fq "$USERID"; then
+          exit 0
+        fi
+
+        sudo -n /usr/sbin/pveum user add "$USERID" \
+          --password "{{ item.initial_password }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ generated_students.students }}"
+
+    - name: Ensure generated student group membership is present
+      shell: |
+        set -e
+        USERID="{{ item.username }}@{{ proxmox_realm }}"
+        GROUPID="{{ sections_data.sections[item.section].proxmox.student_group }}"
+        sudo -n /usr/sbin/pveum user modify "$USERID" --groups "$GROUPID"
+      args:
+        executable: /bin/bash
+      loop: "{{ generated_students.students }}"
+
+    - name: Ensure teacher users exist
+      shell: |
+        set -e
+        USERID="{{ item.username }}@{{ proxmox_realm }}"
+
+        if sudo -n /usr/sbin/pveum user list | grep -Fq "$USERID"; then
+          exit 0
+        fi
+
+        # Set a temporary password manually later if needed
+        sudo -n /usr/sbin/pveum user add "$USERID" --password "ChangeMe123"
+      args:
+        executable: /bin/bash
+      loop: "{{ generated_students.teachers | default([]) }}"
+
+    - name: Ensure teacher group membership is present
+      shell: |
+        set -e
+        USERID="{{ item.username }}@{{ proxmox_realm }}"
+        GROUPID="{{ sections_data.sections[item.section].proxmox.teacher_group }}"
+        sudo -n /usr/sbin/pveum user modify "$USERID" --groups "grp-teachers,$GROUPID"
+      args:
+        executable: /bin/bash
+      loop: "{{ generated_students.teachers | default([]) }}"
+

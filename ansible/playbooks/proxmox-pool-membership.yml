@@ -1,0 +1,74 @@
+- name: Enroll VMs into Proxmox pools
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  module_defaults:
+    group/community.proxmox.proxmox:
+      api_host: "{{ proxmox_api_host }}"
+      api_user: "{{ proxmox_api_user }}"
+      api_token_id: "{{ proxmox_api_token_id }}"
+      api_token_secret: "{{ proxmox_api_token_secret }}"
+      validate_certs: "{{ proxmox_validate_certs }}"
+  vars:
+    teachers_data: "{{ lookup('file', teachers_file) | from_yaml }}"
+    sections_data: "{{ lookup('file', sections_file) | from_yaml }}"
+    slots_data: "{{ lookup('file', slots_file) | from_yaml }}"
+    policy_data: "{{ lookup('file', policy_file) | from_yaml }}"
+    generated_students: "{{ lookup('file', generated_students_file) | from_yaml }}"
+
+    slot_count: "{{ slots_data.slots | length }}"
+    student_start: "{{ policy_data.vm_offsets.student_start }}"
+    teacher_start: "{{ policy_data.vm_offsets.teacher_start }}"
+
+    student_pool_members: >-
+      {%- set out = [] -%}
+      {%- for s in generated_students.students -%}
+      {%-   set section = sections_data.sections[s.section] -%}
+      {%-   set teacher = teachers_data.teachers[section.teacher] -%}
+      {%-   for slot_name, slot_data in slots_data.slots.items() -%}
+      {%-     set _ = out.append({
+              'poolid': s.proxmox_pool,
+              'member': teacher.teacher_id * 1000000 + section.section_code * 1000 + student_start + (s.student_index * slot_count) + slot_data.slot_index,
+              'label': s.username ~ '-' ~ slot_name
+            }) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+    teacher_pool_members: >-
+      {%- set out = [] -%}
+      {%- for t in generated_students.teachers | default([]) -%}
+      {%-   set section = sections_data.sections[t.section] -%}
+      {%-   set teacher = teachers_data.teachers[section.teacher] -%}
+      {%-   for slot_name, slot_data in slots_data.slots.items() -%}
+      {%-     set _ = out.append({
+              'poolid': section.proxmox.shared_pool,
+              'member': teacher.teacher_id * 1000000 + section.section_code * 1000 + teacher_start + (t.teacher_index * slot_count) + slot_data.slot_index,
+              'label': t.username ~ '-' ~ slot_name
+            }) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+  tasks:
+    - name: Add student VMs to personal pools
+      community.proxmox.proxmox_pool_member:
+        poolid: "{{ item.poolid }}"
+        member: "{{ item.member }}"
+        type: vm
+        state: present
+      loop: "{{ student_pool_members }}"
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Add teacher VMs to shared pools
+      community.proxmox.proxmox_pool_member:
+        poolid: "{{ item.poolid }}"
+        member: "{{ item.member }}"
+        type: vm
+        state: present
+      loop: "{{ teacher_pool_members }}"
+      loop_control:
+        label: "{{ item.label }}"

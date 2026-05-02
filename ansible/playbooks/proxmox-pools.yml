@@ -1,0 +1,31 @@
+- name: Create Proxmox pools
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  module_defaults:
+    group/community.proxmox.proxmox:
+      api_host: "{{ proxmox_api_host }}"
+      api_user: "{{ proxmox_api_user }}"
+      api_token_id: "{{ proxmox_api_token_id }}"
+      api_token_secret: "{{ proxmox_api_token_secret }}"
+      validate_certs: "{{ proxmox_validate_certs }}"
+  vars:
+    sections_data: "{{ lookup('file', sections_file) | from_yaml }}"
+    generated_students: "{{ lookup('file', generated_students_file) | from_yaml }}"
+
+  tasks:
+    - name: Ensure teacher shared pools exist
+      community.proxmox.proxmox_pool:
+        poolid: "{{ item.value.proxmox.shared_pool }}"
+        comment: "{{ item.value.alias }} shared resources"
+        state: present
+      loop: "{{ sections_data.sections | dict2items }}"
+
+    - name: Ensure student personal pools exist
+      community.proxmox.proxmox_pool:
+        poolid: "{{ item.proxmox_pool }}"
+        comment: "Personal pool for {{ item.username }}"
+        state: present
+      loop: "{{ generated_students.students }}"

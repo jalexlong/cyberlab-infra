@@ -1,0 +1,34 @@
+- name: Create Proxmox groups
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  module_defaults:
+    group/community.proxmox.proxmox:
+      api_host: "{{ proxmox_api_host }}"
+      api_user: "{{ proxmox_api_user }}"
+      api_token_id: "{{ proxmox_api_token_id }}"
+      api_token_secret: "{{ proxmox_api_token_secret }}"
+      validate_certs: "{{ proxmox_validate_certs }}"
+  vars:
+    sections_data: "{{ lookup('file', sections_file) | from_yaml }}"
+
+  tasks:
+    - name: Ensure student groupos exist
+      community.proxmox.proxmox_group:
+        groupid: "{{ item.value.proxmox.student_group }}"
+        state: present
+      loop: "{{ sections_data.sections | dict2items }}"
+
+    - name: Ensure teacher section groups exist
+      community.proxmox.proxmox_group:
+        groupid: "{{ item.value.proxmox.teacher_group }}"
+        state: present
+      loop: "{{ sections_data.sections | dict2items }}"
+
+    - name: Ensure global teacher group exists
+      community.proxmox.proxmox_group:
+        groupid: "grp-teachers"
+        state: present
+

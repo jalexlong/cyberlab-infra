@@ -64,7 +64,7 @@ sections:
     block: 3
 
     section_code: 213
-    student_count: 24
+    student_count: 3
 
     proxmox:
       student_group: "grp-stu-jlong-cyba3"
