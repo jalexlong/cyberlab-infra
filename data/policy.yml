@@ -1,0 +1,42 @@
+vm_offsets:
+  teacher_start: 10
+  teacher_end: 49
+  shared_start: 50
+  shared_end: 99
+  student_start: 100
+  student_end: 199
+  overflow_start: 200
+  overflow_end: 253
+
+username_policy:
+  format: "<display_section>-<codename>-<nn>"
+  examples:
+    - "cyba3-raven-01"
+    - "itsa2-otter-03"
+    - "icsa1-maple-02"
+
+password_policy:
+  mode: "runtime_generated"
+  style: "two_words_two_digits"
+  examples:
+    - "MapleRiver42"
+    - "TigerOcean18"
+
+pool_policy:
+  student_pool_format: "stu-<username>"
+  teacher_shared_pool_source: "sections.<section>.proxmox.shared_pool"
+
+vm_name_policy:
+  format: "<username>-<slot>"
+  examples:
+    - "cyba3-raven-01-atk"
+    - "cyba3-raven-01-win"
+
+vmid_policy:
+  formula: "teacher_id * 1000000 + section_code * 1000 + offset"
+
+network_policy:
+  formula: "10.<teacher_id>.<section_code>.0/24"
+  gateway_host_octet: 1
+  default_dhcp_start: 100
+  default_dhcp_end: 199

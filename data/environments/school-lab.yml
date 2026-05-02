@@ -1,0 +1,39 @@
+environment:
+  name: "school-lab"
+
+  proxmox:
+    api_host: "10.64.62.200"
+    default_node: "pve1"
+
+  sections:
+    jlong-icsa1:
+      proxmox_node: "pve1"
+      vnet: "t101c011"
+      subnet: "10.101.11.0/24"
+      gateway: "10.101.11.1"
+      dhcp_start: "10.101.11.100"
+      dhcp_end: "10.101.11.199"
+
+    jlong-itsa2:
+      proxmox_node: "pve1"
+      vnet: "t101c112"
+      subnet: "10.101.112.0/24"
+      gateway: "10.101.112.1"
+      dhcp_start: "10.101.112.100"
+      dhcp_end: "10.101.112.199"
+
+    jlong-itsb3:
+      proxmox_node: "pve1"
+      vnet: "t101c123"
+      subnet: "10.101.123.0/24"
+      gateway: "10.101.123.1"
+      dhcp_start: "10.101.123.100"
+      dhcp_end: "10.101.123.199"
+
+    jlong-cyba3:
+      proxmox_node: "pve1"
+      vnet: "t101c213"
+      subnet: "10.101.213.0/24"
+      gateway: "10.101.213.1"
+      dhcp_start: "10.101.213.100"
+      dhcp_end: "10.101.213.199"

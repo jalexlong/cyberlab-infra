@@ -1,0 +1,14 @@
+teachers:
+  jlong:
+    teacher_id: 101
+    full_name: "J Long"
+    sections:
+      - "jlong-icsa1"
+      - "jlong-itsa2"
+      - "jlong-itsb3"
+      - "jlong-cyba3"
+
+  asmith:
+    teacher_id: 102
+    full_name: "Alice Smith"
+    sections: []

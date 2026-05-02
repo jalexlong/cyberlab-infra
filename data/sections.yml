@@ -1,0 +1,72 @@
+sections:
+  jlong-icsa1:
+    display_section: "icsa1"
+    alias: "Intro to Computer Science - A1"
+    teacher_owner: "jlong"
+
+    course_code: "ics"
+    course_name: "Intro to Computer Science"
+    day: "A"
+    block: 1
+
+    section_code: 11
+    student_count: 24
+
+    proxmox:
+      student_group: "grp-stu-jlong-icsa1"
+      teacher_group: "grp-teach-jlong-icsa1"
+      shared_pool: "sec-jlong-icsa1"
+
+  jlong-itsa2:
+    display_section: "itsa2"
+    alias: "IT & Security - A2"
+    teacher_owner: "jlong"
+
+    course_code: "its"
+    course_name: "IT & Security"
+    day: "A"
+    block: 2
+
+    section_code: 112
+    student_count: 16
+
+    proxmox:
+      student_group: "grp-stu-jlong-itsa2"
+      teacher_group: "grp-teach-jlong-itsa2"
+      shared_pool: "sec-jlong-itsa2"
+
+  jlong-itsb3:
+    display_section: "itsb3"
+    alias: "IT & Security - B3"
+    teacher_owner: "jlong"
+
+    course_code: "its"
+    course_name: "IT & Security"
+    day: "B"
+    block: 3
+
+    section_code: 123
+    student_count: 30
+
+    proxmox:
+      student_group: "grp-stu-jlong-itsb3"
+      teacher_group: "grp-teach-jlong-itsb3"
+      shared_pool: "sec-jlong-itsb3"
+
+  jlong-cyba3:
+    display_section: "cyba3"
+    alias: "Cybersecurity - A3"
+    teacher_owner: "jlong"
+
+    course_code: "cyb"
+    course_name: "Cybersecurity"
+    day: "A"
+    block: 3
+
+    section_code: 213
+    student_count: 24
+
+    proxmox:
+      student_group: "grp-stu-jlong-cyba3"
+      teacher_group: "grp-teach-jlong-cyba3"
+      shared_pool: "sec-jlong-cyba3"
