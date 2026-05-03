@@ -65,7 +65,7 @@ build_win7_installer_vm() {
     --bios seabios \
     --machine pc \
     --memory 8192 \
-    --cores 4 \
+    --cores 2 \
     --cpu x86-64-v2-AES \
     --scsihw virtio-scsi-pci \
     --net0 e1000,bridge="${BRIDGE}"

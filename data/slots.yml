@@ -9,7 +9,7 @@ slots:
   win:
     slot_index: 1
     template_name: "win7-template"
-    cpu: 4
+    cpu: 2
     memory_mb: 8192
     disk_gb: 60
 
