@@ -5,7 +5,7 @@
     - ../group_vars/all.yml
 
   vars:
-    template_script_src: "../scripts/build-cloud-templates.sh"
+    template_script_src: "../../scripts/build-cloud-templates.sh"
     template_script_dest: "/home/alex/build-cloud-templates.sh"
 
   tasks:
