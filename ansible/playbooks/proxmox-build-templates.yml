@@ -1,23 +1,32 @@
-- name: Build cloud templates on Proxmox host
+- name: Build and prepare Proxmox templates
   hosts: poseidon
   gather_facts: false
   vars_files:
     - ../group_vars/all.yml
 
   vars:
-    template_script_src: "../../scripts/build-cloud-templates.sh"
-    template_script_dest: "/home/alex/build-cloud-templates.sh"
+    imported_script_src: "../scripts/build-imported-templates.sh"
+    imported_script_dest: "/home/alex/build-imported-templates.sh"
+
+    installer_script_src: "../scripts/create-installer-template-vms.sh"
+    installer_script_dest: "/home/alex/create-installer-template-vms.sh"
 
   tasks:
-    - name: Copy template build script to host
+    - name: Copy imported-template build script to host
       copy:
-        src: "{{ template_script_src }}"
-        dest: "{{ template_script_dest }}"
+        src: "{{ imported_script_src }}"
+        dest: "{{ imported_script_dest }}"
+        mode: "0755"
+
+    - name: Copy installer-template build script to host
+      copy:
+        src: "{{ installer_script_src }}"
+        dest: "{{ installer_script_dest }}"
         mode: "0755"
 
     - name: Build Debian template
       become: true
-      command: "{{ template_script_dest }} debian"
+      command: "{{ imported_script_dest }} debian"
       register: debian_build
 
     - name: Show Debian build output
@@ -26,9 +35,27 @@
 
     - name: Build Parrot template
       become: true
-      command: "{{ template_script_dest }} parrot"
+      command: "{{ imported_script_dest }} parrot"
       register: parrot_build
 
     - name: Show Parrot build output
       debug:
         var: parrot_build.stdout_lines
+
+    - name: Build Metasploitable2 template
+      become: true
+      command: "{{ imported_script_dest }} metasploitable"
+      register: metasploitable_build
+
+    - name: Show Metasploitable2 build output
+      debug:
+        var: metasploitable_build.stdout_lines
+
+    - name: Create Windows 7 installer VM
+      become: true
+      command: "{{ installer_script_dest }} win7"
+      register: win7_build
+
+    - name: Show Windows 7 build output
+      debug:
+        var: win7_build.stdout_lines
