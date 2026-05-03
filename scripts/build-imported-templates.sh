@@ -24,16 +24,30 @@ METASPLOITABLE_FILE="${METASPLOITABLE_FILE:-metasploitable-linux-2.0.0.zip}"
 WORKDIR="/var/lib/vz/template/cache/cyberlab"
 mkdir -p "${WORKDIR}"
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Missing required command: $1" >&2
-    exit 1
-  }
+APT_UPDATED=0
+
+ensure_cmd() {
+  local cmd="$1"
+  local pkg="$2"
+
+  if command -v "$cmd" >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ "${APT_UPDATED}" -eq 0 ]]; then
+    echo "Running apt-get update"
+    apt-get update
+    APT_UPDATED=1
+  fi
+
+  echo "Installing missing dependency: ${pkg}"
+  apt-get install -y "${pkg}"
 }
 
-for cmd in qm curl unzip find; do
-  need_cmd "$cmd"
-done
+ensure_cmd qm qemu-server
+ensure_cmd curl curl
+ensure_cmd unzip unzip
+ensure_cmd find findutils
 
 download_if_missing() {
   local url="$1"
