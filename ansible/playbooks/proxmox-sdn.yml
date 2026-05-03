@@ -1,0 +1,44 @@
+- name: Create Proxmox SDN zone and VNet
+  hosts: poseidon
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    environment_data: "{{ lookup('file', '../data/environments/demo-lab.yml') | from_yaml }}"
+    demo_section_key: "jlong-cyba3"
+    sdn_zone: "cyberlab"
+
+  tasks:
+    - name: Read VNet config for demo section
+      set_fact:
+        section_env: "{{ environment_data.environment.sections[demo_section_key] }}"
+
+    - name: Ensure SDN zone exists
+      become: true
+      shell: |
+        set -e
+        if pvesh get /cluster/sdn/zones --output-format json | grep -Fq "\"zone\":\"{{ sdn_zone }}\""; then
+          exit 0
+        fi
+        pvesh create /cluster/sdn/zones \
+          --zone {{ sdn_zone }} \
+          --type simple
+      args:
+        executable: /bin/bash
+
+    - name: Ensure VNet exists
+      become: true
+      shell: |
+        set -e
+        if pvesh get /cluster/sdn/vnets --output-format json | grep -Fq "\"vnet\":\"{{ section_env.vnet }}\""; then
+          exit 0
+        fi
+        pvesh create /cluster/sdn/vnets \
+          --vnet {{ section_env.vnet }} \
+          --zone {{ sdn_zone }}
+      args:
+        executable: /bin/bash
+
+    - name: Apply pending SDN changes
+      become: true
+      command: pvesh set /cluster/sdn
