@@ -4,7 +4,7 @@
   vars_files:
     - ../group_vars/all.yml
   vars:
-    environment_data: "{{ lookup('file', '../data/environments/demo-lab.yml') | from_yaml }}"
+    environment_data: "{{ lookup('file', '../../data/environments/demo-lab.yml') | from_yaml }}"
     demo_section_key: "jlong-cyba3"
     sdn_zone: "cyberlab"
 
