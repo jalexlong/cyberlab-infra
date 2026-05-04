@@ -6,16 +6,16 @@
 
   vars:
     imported_script_src: "../../scripts/build-imported-templates.sh"
-    imported_script_dest: "/home/alex/build-imported-templates.sh"
+    imported_script_dest: "/home/jlong/build-imported-templates.sh"
 
     installer_script_src: "../../scripts/create-installer-template-vms.sh"
-    installer_script_dest: "/home/alex/create-installer-template-vms.sh"
+    installer_script_dest: "/home/jlong/create-installer-template-vms.sh"
 
     template_env_src: "../../scripts/template_env.py"
-    template_env_dest: "/home/alex/template_env.py"
+    template_env_dest: "/home/jlong/template_env.py"
 
     templates_data_src: "../../data/templates.yml"
-    templates_data_dest: "/home/alex/templates.yml"
+    templates_data_dest: "/home/jlong/templates.yml"
 
   tasks:
     - name: Copy imported-template build script

@@ -97,7 +97,7 @@
         - "'debian-13-standard_13.0-1_amd64.tar.zst' not in pveam_available.stdout"
 
     - name: Find local template volume path
-      shell: "pveam list local | awk '/debian-13-standard/ {print $2}' | tail -n 1"
+      shell: "pveam list local | grep 'debian-13-standard' | awk '{print $1}' | tail -n 1"
       register: local_template_volume
       changed_when: false
       become: true
@@ -135,18 +135,31 @@
       pause:
         seconds: 10
 
+    - name: Copy bootstrap-controller.sh to Proxmox host temp path
+      copy:
+        src: "{{ repo_root }}/scripts/bootstrap-controller.sh"
+        dest: /tmp/bootstrap-controller.sh
+        mode: "0755"
+      become: true
+
     - name: Push bootstrap-controller.sh into controller
       command: >
         pct push
         {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
-        {{ repo_root }}/scripts/bootstrap-controller.sh
-        /root/bootstrap-controller.sh
+        /tmp/bootstrap-controller.sh
+        /tmp/bootstrap-controller.sh
+      become: true
+
+    - name: Check bootstrap script inside controller
+      command: >
+        pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
+        ls -l /tmp/bootstrap-controller.sh
       become: true
 
     - name: Make bootstrap-controller.sh executable inside controller
       command: >
         pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
-        chmod 0755 /root/bootstrap-controller.sh
+        chmod 0755 /tmp/bootstrap-controller.sh
       become: true
 
     - name: Run bootstrap-controller.sh inside controller
@@ -155,7 +168,7 @@
         env
         REPO_URL={{ cyberlab_repo_url }}
         REPO_BRANCH={{ cyberlab_repo_branch }}
-        bash /root/bootstrap-controller.sh
+        bash /tmp/bootstrap-controller.sh
       become: true
 
     - name: Show controller status

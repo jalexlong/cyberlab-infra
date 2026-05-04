@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
 REPO_URL="${REPO_URL:-}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_DIR="${REPO_DIR:-$HOME/cyberlab-infra}"
@@ -30,7 +33,6 @@ install_packages() {
     ca-certificates \
     gnupg \
     lsb-release \
-    software-properties-common \
     ansible
 }
 
@@ -77,40 +79,11 @@ create_private_dirs() {
 }
 
 write_env_helper() {
-  local helper="${HOME}/.local/bin/cyberlab-env"
-  install -d -m 0755 "${HOME}/.local/bin"
-
-  cat > "${helper}" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-REPO_DIR="${REPO_DIR:-$HOME/cyberlab-infra}"
-
-if [[ $# -lt 1 ]]; then
-  echo "usage: cyberlab-env <school-lab|demo-lab>" >&2
-  exit 1
-fi
-
-ENV_NAME="$1"
-case "${ENV_NAME}" in
-  school-lab|demo-lab) ;;
-  *)
-    echo "Unsupported environment: ${ENV_NAME}" >&2
-    exit 1
-    ;;
-esac
-
-export CYBERLAB_ENV="${ENV_NAME}"
-export CYBERLAB_REPO_ROOT="${REPO_DIR}"
-export CYBERLAB_ENV_FILE="${REPO_DIR}/data/environments/${ENV_NAME}.yml"
-export TF_VAR_environment_file="${CYBERLAB_ENV_FILE}"
-export ANSIBLE_INVENTORY="${REPO_DIR}/ansible/inventories/${ENV_NAME}.yml"
-
-echo "CYBERLAB_ENV=${CYBERLAB_ENV}"
-echo "CYBERLAB_ENV_FILE=${CYBERLAB_ENV_FILE}"
-echo "ANSIBLE_INVENTORY=${ANSIBLE_INVENTORY}"
+  install -d -m 0755 "${HOME}/.config/environment.d"
+  cat > "${HOME}/.config/environment.d/10-cyberlab.conf" <<'EOF'
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
 EOF
-
-  chmod 0755 "${helper}"
 }
 
 print_summary() {
@@ -138,22 +111,18 @@ main() {
   fi
 
   need_cmd apt-get
+
+  install_packages
   need_cmd curl
   need_cmd gpg
 
-  install_packages
   install_opentofu
   clone_or_update_repo
   create_private_dirs
 
   local target_home
-  target_home="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
-  if [[ -n "${target_home}" && -d "${target_home}" ]]; then
-    HOME="${target_home}" write_env_helper
-    chown -R "${SUDO_USER:-root}:${SUDO_USER:-root}" "${REPO_DIR}" "${PRIVATE_DIR}" "${target_home}/.local"
-  else
-    write_env_helper
-  fi
+  target_home="/root"
+  HOME="${target_home}" write_env_helper
 
   print_summary
 }

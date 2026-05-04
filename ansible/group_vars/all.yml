@@ -4,8 +4,8 @@ proxmox_api_token_id: "automation"
 proxmox_api_token_secret: "91598b42-07fd-4975-befb-db0ca0cb028f"
 proxmox_validate_certs: false
 
-teachers_file: "/home/alex/cyberlab-infra/data/teachers.yml"
-sections_file: "/home/alex/cyberlab-infra/data/sections.yml"
-slots_file: "/home/alex/cyberlab-infra/data/slots.yml"
-policy_file: "/home/alex/cyberlab-infra/data/policy.yml"
-generated_students_file: "/home/alex/cyberlab-infra/private/generated/students.yml"
+teachers_file: "/home/jlong/cyberlab-infra/data/teachers.yml"
+sections_file: "/home/jlong/cyberlab-infra/data/sections.yml"
+slots_file: "/home/jlong/cyberlab-infra/data/slots.yml"
+policy_file: "/home/jlong/cyberlab-infra/data/policy.yml"
+generated_students_file: "/home/jlong/cyberlab-infra/private/generated/students.yml"
