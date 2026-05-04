@@ -1,0 +1,146 @@
+- name: Bootstrap Proxmox host for Cyberlab
+  hosts: proxmox_hosts
+  gather_facts: false
+
+  vars:
+    repo_root: "{{ playbook_dir }}/../.."
+    bootstrap_policy_file: "{{ repo_root }}/data/bootstrap-policy.yml"
+
+  pre_tasks:
+    - name: Load bootstrap policy
+      include_vars:
+        file: "{{ bootstrap_policy_file }}"
+        name: bootstrap_policy
+
+    - name: Assert bootstrap policy loaded
+      assert:
+        that:
+          - bootstrap_policy.bootstrap is defined
+          - bootstrap_policy.bootstrap.proxmox is defined
+          - bootstrap_policy.bootstrap.controller_lxc is defined
+          - bootstrap_policy.bootstrap.tooling is defined
+        fail_msg: "bootstrap-policy.yml is missing required keys."
+
+  tasks:
+    - name: Ensure required host packages are installed
+      apt:
+        name:
+          - dnsmasq
+          - curl
+          - sudo
+          - python3
+          - python3-apt
+        state: present
+        update_cache: true
+      become: true
+
+    - name: Check whether Proxmox automation user exists
+      command: "pveum user list"
+      register: pveum_user_list
+      changed_when: false
+      become: true
+
+    - name: Create Proxmox automation user
+      command: >
+        pveum user add {{ bootstrap_policy.bootstrap.proxmox.automation_user }}
+      when: bootstrap_policy.bootstrap.proxmox.automation_user not in pveum_user_list.stdout
+      become: true
+
+    - name: Check whether automation API token exists
+      command: >
+        pveum user token list {{ bootstrap_policy.bootstrap.proxmox.automation_user }}
+      register: pveum_token_list
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Create automation API token
+      command: >
+        pveum user token add
+        {{ bootstrap_policy.bootstrap.proxmox.automation_user }}
+        {{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}
+        --privsep 0
+      register: automation_token_create
+      when: pveum_token_list.rc != 0 or bootstrap_policy.bootstrap.proxmox.automation_token_id not in pveum_token_list.stdout
+      become: true
+
+    - name: Show automation token creation output
+      debug:
+        msg: "{{ automation_token_create.stdout_lines | default(['Token already exists; no new token created.']) }}"
+
+    - name: Check whether controller LXC already exists
+      command: "pct config {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_ct_check
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: List available LXC templates
+      command: "pveam available --section system"
+      register: pveam_available
+      changed_when: false
+      become: true
+      when: controller_ct_check.rc != 0
+
+    - name: Download Debian 13 standard template if missing
+      command: >
+        pveam download local
+        debian-13-standard_13.0-1_amd64.tar.zst
+      register: pveam_download
+      changed_when: "'downloaded' in (pveam_download.stdout | lower)"
+      failed_when: false
+      become: true
+      when:
+        - controller_ct_check.rc != 0
+        - "'debian-13-standard_13.0-1_amd64.tar.zst' not in pveam_available.stdout"
+
+    - name: Find local template volume path
+      shell: "pveam list local | awk '/debian-13-standard/ {print $2}' | tail -n 1"
+      register: local_template_volume
+      changed_when: false
+      become: true
+      when: controller_ct_check.rc != 0
+
+    - name: Assert local Debian 13 template was found
+      assert:
+        that:
+          - local_template_volume.stdout | length > 0
+        fail_msg: "Could not find a local Debian 13 LXC template volume on storage 'local'."
+      when: controller_ct_check.rc != 0
+
+    - name: Create automation controller LXC
+      command: >
+        pct create {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+        {{ local_template_volume.stdout }}
+        --hostname {{ bootstrap_policy.bootstrap.controller_lxc.hostname }}
+        --cores {{ bootstrap_policy.bootstrap.controller_lxc.cores }}
+        --memory {{ bootstrap_policy.bootstrap.controller_lxc.memory_mb }}
+        --rootfs local-lvm:{{ bootstrap_policy.bootstrap.controller_lxc.disk_gb }}
+        --net0 name=eth0,bridge={{ bootstrap_policy.bootstrap.controller_lxc.bridge }},ip=dhcp
+        --unprivileged {{ 1 if bootstrap_policy.bootstrap.controller_lxc.unprivileged else 0 }}
+        --onboot {{ 1 if bootstrap_policy.bootstrap.controller_lxc.start_on_boot else 0 }}
+      become: true
+      when: controller_ct_check.rc != 0
+
+    - name: Start automation controller LXC
+      command: "pct start {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_start
+      changed_when: controller_start.rc == 0
+      failed_when: false
+      become: true
+
+    - name: Show controller status
+      command: "pct status {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_status
+      changed_when: false
+      become: true
+
+    - name: Display controller bootstrap summary
+      debug:
+        msg:
+          - "Automation user: {{ bootstrap_policy.bootstrap.proxmox.automation_user }}"
+          - "Automation token id: {{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}"
+          - "Controller CTID: {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+          - "Controller hostname: {{ bootstrap_policy.bootstrap.controller_lxc.hostname }}"
+          - "Controller status: {{ controller_status.stdout }}"
+
