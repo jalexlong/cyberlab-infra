@@ -2,45 +2,24 @@
 set -euo pipefail
 
 ACTION="${1:-all}"
-
-STORAGE_VM="local-lvm"
-BRIDGE="vmbr0"
-
-DEBIAN_VMID=9003
-DEBIAN_NAME="debian13-template"
-DEBIAN_URL="${DEBIAN_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2}"
-DEBIAN_FILE="${DEBIAN_FILE:-debian-13-genericcloud-amd64.qcow2}"
-
-PARROT_VMID=9001
-PARROT_NAME="parrot-template"
-PARROT_URL="${PARROT_URL:-https://deb.parrot.sh/parrot/iso/7.1/Parrot-security-7.1_amd64.qcow2}"
-PARROT_FILE="${PARROT_FILE:-Parrot-security-7.1_amd64.qcow2}"
-
-METASPLOITABLE_VMID=9004
-METASPLOITABLE_NAME="metasploitable2-template"
-METASPLOITABLE_URL="${METASPLOITABLE_URL:-https://downloads.metasploit.com/data/metasploitable/metasploitable-linux-2.0.0.zip}"
-METASPLOITABLE_FILE="${METASPLOITABLE_FILE:-metasploitable-linux-2.0.0.zip}"
-
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEMPLATES_FILE="${REPO_ROOT}/data/templates.yml"
 WORKDIR="/var/lib/vz/template/cache/cyberlab"
 mkdir -p "${WORKDIR}"
 
-APT_UPDATED=0
+STORAGE_VM="${STORAGE_VM:-local-lvm}"
 
+APT_UPDATED=0
 ensure_cmd() {
   local cmd="$1"
   local pkg="$2"
-
   if command -v "$cmd" >/dev/null 2>&1; then
     return
   fi
-
   if [[ "${APT_UPDATED}" -eq 0 ]]; then
-    echo "Running apt-get update"
     apt-get update
     APT_UPDATED=1
   fi
-
-  echo "Installing missing dependency: ${pkg}"
   apt-get install -y "${pkg}"
 }
 
@@ -48,16 +27,22 @@ ensure_cmd qm qemu-server
 ensure_cmd curl curl
 ensure_cmd unzip unzip
 ensure_cmd find findutils
+ensure_cmd python3 python3
+ensure_cmd python3-yaml python3-yaml
+
+load_template() {
+  local key="$1"
+  # shellcheck disable=SC1090
+  source <(python3 "${REPO_ROOT}/scripts/template_env.py" "${TEMPLATES_FILE}" "${key}")
+}
 
 download_if_missing() {
   local url="$1"
   local outfile="$2"
-
   if [[ -f "${outfile}" ]]; then
     echo "Using cached file: ${outfile}"
     return
   fi
-
   echo "Downloading ${url}"
   curl -L --fail --output "${outfile}" "${url}"
 }
@@ -65,126 +50,107 @@ download_if_missing() {
 destroy_if_exists() {
   local vmid="$1"
   if qm status "${vmid}" >/dev/null 2>&1; then
-    echo "VMID ${vmid} already exists. Destroying it first."
+    echo "Destroying existing VMID ${vmid}"
     qm stop "${vmid}" >/dev/null 2>&1 || true
     qm destroy "${vmid}" --destroy-unreferenced-disks 1
   fi
 }
 
-build_debian_template() {
-  local img="${WORKDIR}/${DEBIAN_FILE}"
+build_import_candidate() {
+  local key="$1"
+  load_template "${key}"
 
-  download_if_missing "${DEBIAN_URL}" "${img}"
-  destroy_if_exists "${DEBIAN_VMID}"
+  local filename
+  filename="$(basename "${SOURCE_URL}")"
+  local image_path="${WORKDIR}/${filename}"
 
-  qm create "${DEBIAN_VMID}" \
-    --name "${DEBIAN_NAME}" \
-    --ostype l26 \
-    --scsihw virtio-scsi-pci \
-    --agent enabled=1 \
-    --memory 2048 \
-    --cores 2 \
+  download_if_missing "${SOURCE_URL}" "${image_path}"
+  destroy_if_exists "${CANDIDATE_VMID}"
+
+  qm create "${CANDIDATE_VMID}" \
+    --name "${CANDIDATE_NAME}" \
+    --ostype "${OS_TYPE}" \
+    --memory "${MEMORY_MB}" \
+    --cores "${CPU}" \
     --cpu x86-64-v2-AES \
-    --net0 virtio,bridge="${BRIDGE}"
+    --scsihw "${SCSIHW}" \
+    --net0 "${NET_MODEL},bridge=${BRIDGE}"
 
-  qm importdisk "${DEBIAN_VMID}" "${img}" "${STORAGE_VM}"
+  qm importdisk "${CANDIDATE_VMID}" "${image_path}" "${STORAGE_VM}"
 
-  qm set "${DEBIAN_VMID}" \
-    --scsi0 "${STORAGE_VM}:vm-${DEBIAN_VMID}-disk-0" \
-    --boot order=scsi0 \
-    --serial0 socket \
-    --vga serial0 \
-    --ide2 "${STORAGE_VM}:cloudinit"
+  qm set "${CANDIDATE_VMID}" \
+    --scsi0 "${STORAGE_VM}:vm-${CANDIDATE_VMID}-disk-0" \
+    --boot order=scsi0
 
-  qm template "${DEBIAN_VMID}"
-  echo "Built ${DEBIAN_NAME} (${DEBIAN_VMID})"
+  if [[ "${CLOUD_INIT}" == "true" ]]; then
+    qm set "${CANDIDATE_VMID}" \
+      --ide2 "${STORAGE_VM}:cloudinit" \
+      --serial0 socket \
+      --vga serial0
+  else
+    qm set "${CANDIDATE_VMID}" \
+      --serial0 socket \
+      --vga std
+  fi
+
+  if [[ "${AGENT_EXPECTED}" == "true" ]]; then
+    qm set "${CANDIDATE_VMID}" --agent enabled=1
+  else
+    qm set "${CANDIDATE_VMID}" --agent enabled=0 || true
+  fi
+
+  echo "Built candidate ${CANDIDATE_NAME} (${CANDIDATE_VMID})"
 }
 
-build_parrot_template() {
-  local img="${WORKDIR}/${PARROT_FILE}"
+build_metasploitable_candidate() {
+  load_template "metasploitable2"
 
-  download_if_missing "${PARROT_URL}" "${img}"
-  destroy_if_exists "${PARROT_VMID}"
-
-  qm create "${PARROT_VMID}" \
-    --name "${PARROT_NAME}" \
-    --ostype l26 \
-    --scsihw virtio-scsi-pci \
-    --agent enabled=1 \
-    --memory 4096 \
-    --cores 2 \
-    --cpu x86-64-v2-AES \
-    --net0 virtio,bridge="${BRIDGE}"
-
-  qm importdisk "${PARROT_VMID}" "${img}" "${STORAGE_VM}"
-
-  qm set "${PARROT_VMID}" \
-    --scsi0 "${STORAGE_VM}:vm-${PARROT_VMID}-disk-0" \
-    --boot order=scsi0 \
-    --serial0 socket \
-    --vga serial0
-
-  qm template "${PARROT_VMID}"
-  echo "Built ${PARROT_NAME} (${PARROT_VMID})"
-}
-
-build_metasploitable_template() {
-  local zip="${WORKDIR}/${METASPLOITABLE_FILE}"
+  local zip_path="${WORKDIR}/$(basename "${SOURCE_URL}")"
   local extract_dir="${WORKDIR}/metasploitable2"
 
-  download_if_missing "${METASPLOITABLE_URL}" "${zip}"
+  download_if_missing "${SOURCE_URL}" "${zip_path}"
   rm -rf "${extract_dir}"
   mkdir -p "${extract_dir}"
-  unzip -o "${zip}" -d "${extract_dir}"
+  unzip -o "${zip_path}" -d "${extract_dir}"
 
   local vmdk
   vmdk="$(find "${extract_dir}" -iname '*.vmdk' | head -n 1)"
+  [[ -n "${vmdk}" ]]
 
-  if [[ -z "${vmdk}" ]]; then
-    echo "No VMDK found in ${extract_dir}" >&2
-    exit 1
-  fi
+  destroy_if_exists "${CANDIDATE_VMID}"
 
-  destroy_if_exists "${METASPLOITABLE_VMID}"
-
-  qm create "${METASPLOITABLE_VMID}" \
-    --name "${METASPLOITABLE_NAME}" \
-    --ostype l26 \
-    --memory 2048 \
-    --cores 2 \
+  qm create "${CANDIDATE_VMID}" \
+    --name "${CANDIDATE_NAME}" \
+    --ostype "${OS_TYPE}" \
+    --memory "${MEMORY_MB}" \
+    --cores "${CPU}" \
     --cpu x86-64-v2-AES \
-    --scsihw virtio-scsi-pci \
-    --net0 virtio,bridge="${BRIDGE}"
+    --scsihw "${SCSIHW}" \
+    --net0 "${NET_MODEL},bridge=${BRIDGE}"
 
-  qm importdisk "${METASPLOITABLE_VMID}" "${vmdk}" "${STORAGE_VM}"
+  qm importdisk "${CANDIDATE_VMID}" "${vmdk}" "${STORAGE_VM}"
 
-  qm set "${METASPLOITABLE_VMID}" \
-    --scsi0 "${STORAGE_VM}:vm-${METASPLOITABLE_VMID}-disk-0" \
+  qm set "${CANDIDATE_VMID}" \
+    --scsi0 "${STORAGE_VM}:vm-${CANDIDATE_VMID}-disk-0" \
     --boot order=scsi0 \
     --serial0 socket \
-    --vga serial0
+    --vga std \
+    --agent enabled=0
 
-  qm template "${METASPLOITABLE_VMID}"
-  echo "Built ${METASPLOITABLE_NAME} (${METASPLOITABLE_VMID})"
+  echo "Built candidate ${CANDIDATE_NAME} (${CANDIDATE_VMID})"
 }
 
 case "${ACTION}" in
-  debian)
-    build_debian_template
-    ;;
-  parrot)
-    build_parrot_template
-    ;;
-  metasploitable)
-    build_metasploitable_template
-    ;;
+  debian13) build_import_candidate "debian13" ;;
+  parrot) build_import_candidate "parrot" ;;
+  metasploitable|metasploitable2) build_metasploitable_candidate ;;
   all)
-    build_debian_template
-    build_parrot_template
-    build_metasploitable_template
+    build_import_candidate "debian13"
+    build_import_candidate "parrot"
+    build_metasploitable_candidate
     ;;
   *)
-    echo "Usage: $0 {debian|parrot|metasploitable|all}" >&2
+    echo "Usage: $0 {debian13|parrot|metasploitable2|all}" >&2
     exit 1
     ;;
 esac

@@ -2,41 +2,46 @@
 set -euo pipefail
 
 ACTION="${1:-win7}"
-
-ISO_STORAGE="local"
-VM_STORAGE="local-lvm"
-BRIDGE="vmbr0"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEMPLATES_FILE="${REPO_ROOT}/data/templates.yml"
 CACHE_DIR="/var/lib/vz/template/iso"
 mkdir -p "${CACHE_DIR}"
 
-WIN7_VMID=9002
-WIN7_NAME="win7-template"
-WIN7_ISO_URL="${WIN7_ISO_URL:-https://archive.org/download/win-7-ult-sp1-english/Win7_Ult_SP1_English_x64.iso}"
-WIN7_ISO_FILE="${WIN7_ISO_FILE:-Win7_Ult_SP1_English_x64.iso}"
+ISO_STORAGE="${ISO_STORAGE:-local}"
+VM_STORAGE="${VM_STORAGE:-local-lvm}"
 
-VIRTIO_ISO_URL="${VIRTIO_ISO_URL:-https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.189-1/virtio-win-0.1.189.iso}"
-VIRTIO_ISO_FILE="${VIRTIO_ISO_FILE:-virtio-win-0.1.189.iso}"
-
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Missing required command: $1" >&2
-    exit 1
-  }
+APT_UPDATED=0
+ensure_cmd() {
+  local cmd="$1"
+  local pkg="$2"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    return
+  fi
+  if [[ "${APT_UPDATED}" -eq 0 ]]; then
+    apt-get update
+    APT_UPDATED=1
+  fi
+  apt-get install -y "${pkg}"
 }
 
-for cmd in qm curl; do
-  need_cmd "$cmd"
-done
+ensure_cmd qm qemu-server
+ensure_cmd curl curl
+ensure_cmd python3 python3
+ensure_cmd python3-yaml python3-yaml
+
+load_template() {
+  local key="$1"
+  # shellcheck disable=SC1090
+  source <(python3 "${REPO_ROOT}/scripts/template_env.py" "${TEMPLATES_FILE}" "${key}")
+}
 
 download_if_missing() {
   local url="$1"
   local outfile="$2"
-
   if [[ -f "${outfile}" ]]; then
     echo "Using cached file: ${outfile}"
     return
   fi
-
   echo "Downloading ${url}"
   curl -L --fail --output "${outfile}" "${url}"
 }
@@ -44,57 +49,58 @@ download_if_missing() {
 destroy_if_exists() {
   local vmid="$1"
   if qm status "${vmid}" >/dev/null 2>&1; then
-    echo "VMID ${vmid} already exists. Destroying it first."
+    echo "Destroying existing VMID ${vmid}"
     qm stop "${vmid}" >/dev/null 2>&1 || true
     qm destroy "${vmid}" --destroy-unreferenced-disks 1
   fi
 }
 
-build_win7_installer_vm() {
-  local win7_iso="${CACHE_DIR}/${WIN7_ISO_FILE}"
-  local virtio_iso="${CACHE_DIR}/${VIRTIO_ISO_FILE}"
+build_win7_candidate() {
+  load_template "win7"
 
-  download_if_missing "${WIN7_ISO_URL}" "${win7_iso}"
-  download_if_missing "${VIRTIO_ISO_URL}" "${virtio_iso}"
+  local win_iso="${CACHE_DIR}/$(basename "${SOURCE_URL}")"
+  local virtio_iso="${CACHE_DIR}/$(basename "${DRIVER_ISO_URL}")"
 
-  destroy_if_exists "${WIN7_VMID}"
+  download_if_missing "${SOURCE_URL}" "${win_iso}"
+  download_if_missing "${DRIVER_ISO_URL}" "${virtio_iso}"
 
-  qm create "${WIN7_VMID}" \
-    --name "${WIN7_NAME}" \
-    --ostype win7 \
-    --bios seabios \
-    --machine pc \
-    --memory 8192 \
-    --cores 2 \
+  destroy_if_exists "${CANDIDATE_VMID}"
+
+  qm create "${CANDIDATE_VMID}" \
+    --name "${CANDIDATE_NAME}" \
+    --ostype "${OS_TYPE}" \
+    --bios "${BIOS}" \
+    --machine "${MACHINE}" \
+    --memory "${MEMORY_MB}" \
+    --cores "${CPU}" \
     --cpu x86-64-v2-AES \
-    --scsihw virtio-scsi-pci \
-    --net0 e1000,bridge="${BRIDGE}"
+    --net0 "${NET_MODEL},bridge=${BRIDGE}"
 
-  qm set "${WIN7_VMID}" \
-    --scsi0 "${VM_STORAGE}:60" \
-    --ide2 "${ISO_STORAGE}:iso/${WIN7_ISO_FILE},media=cdrom" \
-    --ide3 "${ISO_STORAGE}:iso/${VIRTIO_ISO_FILE},media=cdrom" \
-    --boot order=ide2
+  case "${DISK_BUS}" in
+    sata)
+      qm set "${CANDIDATE_VMID}" --sata0 "${VM_STORAGE}:${DISK_GB}"
+      ;;
+    scsi)
+      qm set "${CANDIDATE_VMID}" --scsi0 "${VM_STORAGE}:${DISK_GB}"
+      ;;
+    *)
+      echo "Unsupported disk bus: ${DISK_BUS}" >&2
+      exit 1
+      ;;
+  esac
 
-  echo
-  echo "Windows 7 installer VM created:"
-  echo "  VMID: ${WIN7_VMID}"
-  echo "  Name: ${WIN7_NAME}"
-  echo
-  echo "Next steps:"
-  echo "  1. Start VM ${WIN7_VMID}"
-  echo "  2. Install Windows 7 manually"
-  echo "  3. Install VirtIO drivers from the attached ISO"
-  echo "  4. Install qemu-guest-agent if desired"
-  echo "  5. Shut down the VM"
-  echo "  6. Convert it to a template: qm template ${WIN7_VMID}"
-  echo
+  qm set "${CANDIDATE_VMID}" \
+    --ide2 "${ISO_STORAGE}:iso/$(basename "${win_iso}"),media=cdrom" \
+    --ide3 "${ISO_STORAGE}:iso/$(basename "${virtio_iso}"),media=cdrom" \
+    --boot order=ide2 \
+    --agent enabled=0
+
+  echo "Built installer candidate ${CANDIDATE_NAME} (${CANDIDATE_VMID})"
+  echo "Install manually, validate, then promote."
 }
 
 case "${ACTION}" in
-  win7|all)
-    build_win7_installer_vm
-    ;;
+  win7|all) build_win7_candidate ;;
   *)
     echo "Usage: $0 {win7|all}" >&2
     exit 1

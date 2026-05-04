@@ -1,4 +1,4 @@
-- name: Build and prepare Proxmox templates
+- name: Build candidate templates on Proxmox host
   hosts: poseidon
   gather_facts: false
   vars_files:
@@ -11,51 +11,69 @@
     installer_script_src: "../../scripts/create-installer-template-vms.sh"
     installer_script_dest: "/home/alex/create-installer-template-vms.sh"
 
+    template_env_src: "../../scripts/template_env.py"
+    template_env_dest: "/home/alex/template_env.py"
+
+    templates_data_src: "../../data/templates.yml"
+    templates_data_dest: "/home/alex/templates.yml"
+
   tasks:
-    - name: Copy imported-template build script to host
+    - name: Copy imported-template build script
       copy:
         src: "{{ imported_script_src }}"
         dest: "{{ imported_script_dest }}"
         mode: "0755"
 
-    - name: Copy installer-template build script to host
+    - name: Copy installer-template build script
       copy:
         src: "{{ installer_script_src }}"
         dest: "{{ installer_script_dest }}"
         mode: "0755"
 
-    - name: Build Debian template
+    - name: Copy template env helper
+      copy:
+        src: "{{ template_env_src }}"
+        dest: "{{ template_env_dest }}"
+        mode: "0755"
+
+    - name: Copy templates data file
+      copy:
+        src: "{{ templates_data_src }}"
+        dest: "{{ templates_data_dest }}"
+        mode: "0644"
+
+    - name: Build Debian 13 candidate
       become: true
-      command: "{{ imported_script_dest }} debian"
+      command: "{{ imported_script_dest }} debian13"
       register: debian_build
 
-    - name: Show Debian build output
+    - name: Show Debian 13 candidate output
       debug:
         var: debian_build.stdout_lines
 
-    - name: Build Parrot template
+    - name: Build Parrot candidate
       become: true
       command: "{{ imported_script_dest }} parrot"
       register: parrot_build
 
-    - name: Show Parrot build output
+    - name: Show Parrot candidate output
       debug:
         var: parrot_build.stdout_lines
 
-    - name: Build Metasploitable2 template
+    - name: Build Metasploitable2 candidate
       become: true
-      command: "{{ imported_script_dest }} metasploitable"
+      command: "{{ imported_script_dest }} metasploitable2"
       register: metasploitable_build
 
-    - name: Show Metasploitable2 build output
+    - name: Show Metasploitable2 candidate output
       debug:
         var: metasploitable_build.stdout_lines
 
-    - name: Create Windows 7 installer VM
+    - name: Build Windows 7 candidate installer VM
       become: true
       command: "{{ installer_script_dest }} win7"
       register: win7_build
 
-    - name: Show Windows 7 build output
+    - name: Show Windows 7 candidate output
       debug:
         var: win7_build.stdout_lines

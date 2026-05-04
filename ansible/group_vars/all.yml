@@ -1,4 +1,4 @@
-proxmox_api_host: "192.168.99.12"
+proxmox_api_host: "10.64.62.200"
 proxmox_api_user: "ansible@pve"
 proxmox_api_token_id: "automation"
 proxmox_api_token_secret: "91598b42-07fd-4975-befb-db0ca0cb028f"

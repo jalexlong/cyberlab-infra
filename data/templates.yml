@@ -1,0 +1,139 @@
+templates:
+  parrot:
+    display_name: "Parrot Security"
+    source_type: "qcow2"
+    source_url: "https://deb.parrot.sh/parrot/iso/7.2/Parrot-security-7.2_amd64.qcow2"
+
+    candidate:
+      vmid: 8901
+      name: "parrot-candidate"
+
+    approved:
+      vmid: 9001
+      name: "parrot-template"
+
+    build:
+      method: "importdisk"
+      os_type: "l26"
+      cpu: 4
+      memory_mb: 4096
+      disk_gb: 64
+      scsihw: "virtio-scsi-pci"
+      net_model: "virtio"
+      bridge: "vmbr0"
+      agent_expected: true
+      cloud_init: false
+
+    validation:
+      required:
+        - "boots_cleanly"
+        - "cosole_works"
+        - "login_works"
+        - "dhcp_works"
+        - "gateway_ping_works"
+        - "guest_agent_detected"
+
+  win7:
+    display_name: "Windows 7"
+    source_type: "iso"
+    source_url: "https://dn710900.ca.archive.org/0/items/7601.24214.1808011700.win7sp1ldrescrowclientultimatex64freenus_202003/7601.24214.180801-1700.win7sp1_ldr_escrow_CLIENT_ULTIMATE_x64FRE_en-us.iso"
+    driver_iso_url: "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.189-1/virtio-win-0.1.189.iso"
+
+    candidate:
+      vmid: 8902
+      name: "win7-candidate"
+
+    approved:
+      vmid: 9002
+      name: "win7-template"
+
+    build:
+      method: "installer"
+      os_type: "win7"
+      cpu: 2
+      memory_mb: 4096
+      disk_gb: 60
+      bios: "seabios"
+      machine: "pc"
+      disk_bus: "sata"
+      net_model: "e1000"
+      bridge: "vmbr0"
+      agent_expected: false
+      cloud_init: false
+
+    validation:
+      required:
+        - "boots_cleanly"
+        - "console_works"
+        - "login_works"
+        - "dhcp_works"
+        - "gateway_ping_works"
+
+  debian13:
+    display_name: "Debian 13"
+    source_type: "qcow2"
+    source_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+
+    candidate:
+      vmid: 8903
+      name: "debian13-candidate"
+
+    approved:
+      vmid: 9003
+      name: "debian13-template"
+
+    build:
+      method: "importdisk"
+      os_type: "l26"
+      cpu: 2
+      memory_mb: 2048
+      disk_gb: 20
+      scsihw: "virtio-scsi-pci"
+      net_model: "virtio"
+      bridge: "vmbr0"
+      agent_expected: true
+      cloud_init: true
+
+    validation:
+      required:
+        - "boots_cleanly"
+        - "cosole_works"
+        - "login_works"
+        - "cloud_init_applies"
+        - "dhcp_works"
+        - "gateway_ping_works"
+        - "guest_agent_detected"
+
+  metasploitable2:
+    display_name: "Metasploitable 2"
+    source_type: "zip_vmdk"
+    source_url: "https://downloads.metasploit.com/data/metasploitable/metasploitable-linux-2.0.0.zip"
+
+    candidate:
+      vmid: 8904
+      name: "metasploitable2-candidate"
+
+    approved:
+      vmid: 9004
+      name: "metasploitable2-template"
+
+    build:
+      method: "importdisk"
+      os_type: "l26"
+      cpu: 2
+      memory_mb: 2048
+      disk_gb: 20
+      scsihw: "virtio-scsi-pci"
+      net_model: "virtio"
+      bridge: "vmbr0"
+      agent_expected: false
+      cloud_init: false
+
+    validation:
+      required:
+        - "boots_cleanly"
+        - "console_works"
+        - "login_works"
+        - "dhcp_works"
+        - "gateway_ping_works"
+
