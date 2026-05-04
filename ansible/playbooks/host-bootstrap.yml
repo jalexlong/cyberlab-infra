@@ -5,6 +5,8 @@
   vars:
     repo_root: "{{ playbook_dir }}/../.."
     bootstrap_policy_file: "{{ repo_root }}/data/bootstrap-policy.yml"
+    cyberlab_repo_url: "https://github.com/jalexlong/cyberlab-infra.git"
+    cyberlab_repo_branch: "main"
 
   pre_tasks:
     - name: Load bootstrap policy
@@ -127,6 +129,33 @@
       register: controller_start
       changed_when: controller_start.rc == 0
       failed_when: false
+      become: true
+
+    - name: Wait briefly after starting controller
+      pause:
+        seconds: 10
+
+    - name: Push bootstrap-controller.sh into controller
+      command: >
+        pct push
+        {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+        {{ repo_root }}/scripts/bootstrap-controller.sh
+        /root/bootstrap-controller.sh
+      become: true
+
+    - name: Make bootstrap-controller.sh executable inside controller
+      command: >
+        pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
+        chmod 0755 /root/bootstrap-controller.sh
+      become: true
+
+    - name: Run bootstrap-controller.sh inside controller
+      command: >
+        pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
+        env
+        REPO_URL={{ cyberlab_repo_url }}
+        REPO_BRANCH={{ cyberlab_repo_branch }}
+        bash /root/bootstrap-controller.sh
       become: true
 
     - name: Show controller status
