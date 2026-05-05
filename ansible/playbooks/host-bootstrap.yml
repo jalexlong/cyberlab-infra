@@ -3,6 +3,17 @@
   gather_facts: false
 
   vars:
+    controller_ctid: 800
+    controller_repo_dir: /root/cyberlab-infra
+    controller_private_dir: /root/cyberlab-infra/private
+    controller_secrets_dir: /root/cyberlab-infra/private/secrets
+    controller_ssh_key_path: /root/.ssh/id_ed25519_controller
+
+    proxmox_api_user: cyberlab-automation@pve
+    proxmox_api_token_name: automation
+    proxmox_api_token_id_full: "{{ proxmox_api_user }}!{{ proxmox_api_token_name }}"
+    proxmox_api_url: "https://{{ ansible_host | default(inventory_hostname) }}:8006/api2/json"
+
     repo_root: "{{ playbook_dir }}/../.."
     bootstrap_policy_file: "{{ repo_root }}/data/bootstrap-policy.yml"
     cyberlab_repo_url: "https://github.com/jalexlong/cyberlab-infra.git"
@@ -170,6 +181,185 @@
         REPO_BRANCH={{ cyberlab_repo_branch }}
         bash /tmp/bootstrap-controller.sh
       become: true
+
+    - name: Ensure controller SSH directory exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - install
+          - -d
+          - -m
+          - "0700"
+          - /root/.ssh
+      become: true
+
+    - name: Check whether controller SSH key exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -f
+          - "{{ controller_ssh_key_path }}"
+      register: controller_ssh_key_check
+      failed_when: false
+      changed_when: false
+      become: true
+
+    - name: Generate controller SSH keypair
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - ssh-keygen
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ controller_ssh_key_path }}"
+      when: controller_ssh_key_check.rc != 0
+      become: true
+
+    - name: Read controller SSH public key
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - cat
+          - "{{ controller_ssh_key_path }}.pub"
+      register: controller_ssh_pubkey
+      changed_when: false
+      become: true
+
+    - name: Ensure root SSH directory exists on Proxmox host
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      become: true
+
+    - name: Authorize controller SSH public key on Proxmox host
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ controller_ssh_pubkey.stdout }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+        state: present
+      become: true
+
+    - name: Ensure controller secrets directory exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - install
+          - -d
+          - -m
+          - "0700"
+          - "{{ controller_secrets_dir }}"
+      become: true
+
+    - name: Write Proxmox API env file inside controller when token was newly created
+      ansible.builtin.copy:
+        dest: /tmp/proxmox-api.env
+        mode: "0600"
+        content: |
+          PROXMOX_API_URL={{ proxmox_api_url }}
+          PROXMOX_API_TOKEN_ID={{ proxmox_api_token_id_full }}
+          PROXMOX_API_TOKEN_SECRET={{ proxmox_token_create_output.stdout | regex_search('([0-9a-fA-F-]{36})') }}
+      when:
+        - proxmox_token_check.rc != 0
+        - proxmox_token_create_output is defined
+      delegate_to: "{{ inventory_hostname }}"
+      become: true
+
+    - name: Push Proxmox API env file into controller when token was newly created
+      ansible.builtin.command:
+        argv:
+          - pct
+          - push
+          - "{{ controller_ctid | string }}"
+          - /tmp/proxmox-api.env
+          - "{{ controller_secrets_dir }}/proxmox-api.env"
+      when:
+        - proxmox_token_check.rc != 0
+        - proxmox_token_create_output is defined
+      become: true
+
+    - name: Set permissions on Proxmox API env file inside controller
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - chmod
+          - "0600"
+          - "{{ controller_secrets_dir }}/proxmox-api.env"
+      when:
+        - proxmox_token_check.rc != 0
+        - proxmox_token_create_output is defined
+      become: true
+
+    - name: Remove temporary Proxmox API env file from Proxmox host
+      ansible.builtin.file:
+        path: /tmp/proxmox-api.env
+        state: absent
+      when:
+        - proxmox_token_check.rc != 0
+        - proxmox_token_create_output is defined
+      become: true
+
+    - name: Validate SSH from controller to Proxmox host
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - bash
+          - -lc
+          - "ssh -i {{ controller_ssh_key_path }} -o StrictHostKeyChecking=no root@{{ ansible_host | default(inventory_hostname) }} hostname"
+      register: controller_ssh_validation
+      changed_when: false
+      become: true
+
+    - name: Validate API file exists inside controller
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -f
+          - "{{ controller_secrets_dir }}/proxmox-api.env"
+      register: controller_api_env_validation
+      changed_when: false
+      become: true
+
+    - name: Show controller trust bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "Controller CT {{ controller_ctid }} SSH validation: {{ controller_ssh_validation.stdout }}"
+          - "Controller API env file present: {{ controller_api_env_validation.rc == 0 }}"
+          - "Proxmox API token id: {{ proxmox_api_token_id_full }}"
 
     - name: Show controller status
       command: "pct status {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
