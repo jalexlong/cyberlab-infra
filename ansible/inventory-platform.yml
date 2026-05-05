@@ -1,0 +1,5 @@
+all:
+  hosts:
+    pve1:
+      ansible_host: 10.64.62.200
+      ansible_user: root

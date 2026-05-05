@@ -1,0 +1,185 @@
+---
+- name: Bootstrap Proxmox SDN from controller
+  hosts: pve1
+  gather_facts: false
+
+  vars:
+    zone_name: "{{ proxmox_sdn.zone.name }}"
+    zone_type: "{{ proxmox_sdn.zone.type }}"
+    zone_dhcp: "{{ proxmox_sdn.zone.dhcp }}"
+    zone_ipam: "{{ proxmox_sdn.zone.ipam }}"
+    zone_mtu: "{{ proxmox_sdn.zone.mtu }}"
+
+  tasks:
+    - name: Check whether SDN zone exists
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - "/cluster/sdn/zones/{{ zone_name }}"
+      register: sdn_zone_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create SDN zone
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /cluster/sdn/zones
+          - --zone
+          - "{{ zone_name }}"
+          - --type
+          - "{{ zone_type }}"
+          - --dhcp
+          - "{{ zone_dhcp }}"
+          - --ipam
+          - "{{ zone_ipam }}"
+          - --mtu
+          - "{{ zone_mtu | string }}"
+      when: sdn_zone_check.rc != 0
+
+    - name: Check whether VNET exists
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - "/cluster/sdn/vnets/{{ item.name }}"
+      loop: "{{ proxmox_sdn.vnets }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vnet_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Create VNETs
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /cluster/sdn/vnets
+          - --vnet
+          - "{{ item.item.name }}"
+          - --zone
+          - "{{ zone_name }}"
+          - --alias
+          - "{{ item.item.alias }}"
+          - --isolate-ports
+          - "{{ 1 if item.item.isolate_ports else 0 }}"
+      loop: "{{ vnet_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.rc != 0
+
+    - name: Check whether subnet exists
+      ansible.builtin.shell: |
+        pvesh get /cluster/sdn/subnets --output-format json | \
+        python3 - <<'PY'
+        import json, sys
+        data = json.load(sys.stdin)
+        target_vnet = "{{ item.name }}"
+        target_subnet = "{{ item.subnet }}"
+        for entry in data:
+            if entry.get("vnet") == target_vnet and entry.get("subnet") == target_subnet:
+                sys.exit(0)
+        sys.exit(1)
+        PY
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_sdn.vnets }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.subnet }}"
+      register: subnet_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Create subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - /cluster/sdn/subnets
+          - --subnet
+          - "{{ item.item.subnet }}"
+          - --vnet
+          - "{{ item.item.name }}"
+          - --gateway
+          - "{{ item.item.gateway }}"
+          - --snat
+          - "{{ 1 if item.item.snat else 0 }}"
+      loop: "{{ subnet_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }} {{ item.item.subnet }}"
+      when: item.rc != 0
+
+    - name: Configure DHCP ranges on subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - set
+          - "/cluster/sdn/subnets/{{ zone_name }}-{{ item.subnet | replace('/', '-') }}"
+          - --dhcp-range
+          - "start-address={{ item.dhcp_start }},end-address={{ item.dhcp_end }}"
+      loop: "{{ proxmox_sdn.vnets }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: dhcp_range_updates
+      failed_when: false
+      changed_when: dhcp_range_updates.rc == 0
+
+    - name: Apply SDN configuration
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - set
+          - /cluster/sdn
+      register: sdn_apply
+      changed_when: sdn_apply.rc == 0
+
+    - name: Reload networking
+      ansible.builtin.command:
+        argv:
+          - ifreload
+          - -a
+      register: ifreload_result
+      changed_when: ifreload_result.rc == 0
+
+    - name: Show resulting SDN zones
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /cluster/sdn/zones
+          - --output-format
+          - yaml
+      register: zones_out
+      changed_when: false
+
+    - name: Show resulting SDN vnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /cluster/sdn/vnets
+          - --output-format
+          - yaml
+      register: vnets_out
+      changed_when: false
+
+    - name: Show resulting SDN subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /cluster/sdn/subnets
+          - --output-format
+          - yaml
+      register: subnets_out
+      changed_when: false
+
+    - name: Print SDN summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ zones_out.stdout }}"
+          - "{{ vnets_out.stdout }}"
+          - "{{ subnets_out.stdout }}"
