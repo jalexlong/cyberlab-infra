@@ -379,15 +379,15 @@
       become: true
 
     - name: Show controller trust bootstrap summary
-  ansible.builtin.debug:
-    msg:
-      - "Controller CT {{ controller_ctid }} SSH validation: {{ controller_ssh_validation.stdout }}"
-      - "Controller API env file present: {{ controller_api_env_validation.rc == 0 }}"
-      - "Proxmox API token id: {{ proxmox_api_token_id_full }}"
-      - "Token existed before run: {{ automation_token_exists }}"
-      - "Secret file existed before run: {{ controller_api_secret_exists }}"
-      - "Token rotated this run: {{ automation_token_rotate_required }}"
-      - "Token created this run: {{ automation_token_create_required }}"
+      ansible.builtin.debug:
+        msg:
+          - "Controller CT {{ controller_ctid }} SSH validation: {{ controller_ssh_validation.stdout }}"
+          - "Controller API env file present: {{ controller_api_env_validation.rc == 0 }}"
+          - "Proxmox API token id: {{ proxmox_api_token_id_full }}"
+          - "Token existed before run: {{ automation_token_exists }}"
+          - "Secret file existed before run: {{ controller_api_secret_exists }}"
+          - "Token rotated this run: {{ automation_token_rotate_required }}"
+          - "Token created this run: {{ automation_token_create_required }}"
 
 
     - name: Show controller status
