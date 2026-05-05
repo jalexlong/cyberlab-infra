@@ -28,10 +28,18 @@
         proxmox_api_env_lines: >-
           {{
             (proxmox_api_env_raw.content | b64decode).splitlines()
-            | reject('match', '^\\s*$')
-            | reject('match', '^\\s*#')
+            | map('trim')
+            | reject('match', '')
+            | reject('match', '^#')
+            | select('match', '^[A-Za-z_][A-Za-z0-9_]*=')
             | list
           }}
+
+    - name: Assert parsed env lines were found
+      ansible.builtin.assert:
+        that:
+          - proxmox_api_env_lines | length > 0
+        fail_msg: "No valid KEY=value lines found in {{ proxmox_api_env_file }}"
 
     - name: Build Proxmox API env map
       ansible.builtin.set_fact:
