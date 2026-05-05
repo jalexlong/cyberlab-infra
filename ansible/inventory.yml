@@ -5,4 +5,4 @@ all:
         pve1:
           ansible_host: 10.64.62.200
           ansible_user: jlong
-
+          ansible_ssh_id: /home/jlong/.ssh/id_ansible
