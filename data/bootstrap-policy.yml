@@ -1,5 +1,6 @@
 bootstrap:
   proxmox:
+    api_host: 10.64.62.200
     automation_user: "cyberlab-automation@pve"
     automation_token_id: "automation"
 
