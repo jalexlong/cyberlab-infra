@@ -1,0 +1,70 @@
+---
+- name: Validate controller access to Proxmox API
+  hosts: controller
+  gather_facts: false
+
+  vars:
+    proxmox_version_endpoint: "/version"
+
+  tasks:
+    - name: Assert Proxmox API env file exists
+      ansible.builtin.stat:
+        path: "{{ proxmox_api_env_file }}"
+      register: proxmox_api_env_file_stat
+
+    - name: Fail if Proxmox API env file is missing
+      ansible.builtin.assert:
+        that:
+          - proxmox_api_env_file_stat.stat.exists
+        fail_msg: "Missing Proxmox API env file at {{ proxmox_api_env_file }}"
+
+    - name: Read Proxmox API env file
+      ansible.builtin.slurp:
+        path: "{{ proxmox_api_env_file }}"
+      register: proxmox_api_env_raw
+
+    - name: Parse Proxmox API env file
+      ansible.builtin.set_fact:
+        proxmox_api_env_lines: >-
+          {{
+            (proxmox_api_env_raw.content | b64decode).splitlines()
+            | reject('match', '^\\s*$')
+            | reject('match', '^\\s*#')
+            | list
+          }}
+
+    - name: Build Proxmox API env map
+      ansible.builtin.set_fact:
+        proxmox_api_env: "{{ proxmox_api_env | default({}) | combine({item.split('=', 1)[0]: item.split('=', 1)[1]}) }}"
+      loop: "{{ proxmox_api_env_lines }}"
+      no_log: true
+
+    - name: Assert required Proxmox API variables are present
+      ansible.builtin.assert:
+        that:
+          - "'PROXMOX_API_URL' in proxmox_api_env"
+          - "'PROXMOX_API_TOKEN_ID' in proxmox_api_env"
+          - "'PROXMOX_API_TOKEN_SECRET' in proxmox_api_env"
+        fail_msg: "Missing one or more required variables in {{ proxmox_api_env_file }}"
+      no_log: true
+
+    - name: Query Proxmox version endpoint
+      ansible.builtin.uri:
+        url: "{{ proxmox_api_env.PROXMOX_API_URL }}{{ proxmox_version_endpoint }}"
+        method: GET
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_env.PROXMOX_API_TOKEN_ID }}={{ proxmox_api_env.PROXMOX_API_TOKEN_SECRET }}"
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: proxmox_version_response
+      no_log: true
+
+    - name: Show Proxmox API validation result
+      ansible.builtin.debug:
+        msg:
+          - "Connected to Proxmox API successfully."
+          - "Version: {{ proxmox_version_response.json.data.version }}"
+          - "Release: {{ proxmox_version_response.json.data.release }}"
+          - "Repo ID: {{ proxmox_version_response.json.data.repoid }}"
+

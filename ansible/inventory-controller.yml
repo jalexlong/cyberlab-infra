@@ -1,0 +1,4 @@
+all:
+  hosts:
+    controller:
+      ansible_connection: local

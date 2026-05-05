@@ -1,0 +1,1 @@
+proxmox_api_env_file: /root/cyberlab-infra/private/secrets/proxmox-api.env
