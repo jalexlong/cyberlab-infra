@@ -275,18 +275,15 @@
           - "{{ controller_secrets_dir }}"
       become: true
 
-    - name: Write Proxmox API env file inside controller when token was newly created
+    - name: Write Proxmox API env file on Proxmox host temp path when token was newly created
       ansible.builtin.copy:
         dest: /tmp/proxmox-api.env
         mode: "0600"
         content: |
           PROXMOX_API_URL={{ proxmox_api_url }}
           PROXMOX_API_TOKEN_ID={{ proxmox_api_token_id_full }}
-          PROXMOX_API_TOKEN_SECRET={{ proxmox_token_create_output.stdout | regex_search('([0-9a-fA-F-]{36})') }}
-      when:
-        - proxmox_token_check.rc != 0
-        - proxmox_token_create_output is defined
-      delegate_to: "{{ inventory_hostname }}"
+          PROXMOX_API_TOKEN_SECRET={{ automation_token_create.stdout | regex_search('([0-9a-fA-F-]{36})') }}
+      when: automation_token_create is defined
       become: true
 
     - name: Push Proxmox API env file into controller when token was newly created
@@ -297,11 +294,9 @@
           - "{{ controller_ctid | string }}"
           - /tmp/proxmox-api.env
           - "{{ controller_secrets_dir }}/proxmox-api.env"
-      when:
-        - proxmox_token_check.rc != 0
-        - proxmox_token_create_output is defined
+      when: automation_token_create is defined
       become: true
-
+    
     - name: Set permissions on Proxmox API env file inside controller
       ansible.builtin.command:
         argv:
@@ -312,18 +307,14 @@
           - chmod
           - "0600"
           - "{{ controller_secrets_dir }}/proxmox-api.env"
-      when:
-        - proxmox_token_check.rc != 0
-        - proxmox_token_create_output is defined
+      when: automation_token_create is defined
       become: true
 
     - name: Remove temporary Proxmox API env file from Proxmox host
       ansible.builtin.file:
         path: /tmp/proxmox-api.env
         state: absent
-      when:
-        - proxmox_token_check.rc != 0
-        - proxmox_token_create_output is defined
+      when: automation_token_create is defined
       become: true
 
     - name: Validate SSH from controller to Proxmox host
