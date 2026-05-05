@@ -29,7 +29,7 @@
           {{
             (proxmox_api_env_raw.content | b64decode).splitlines()
             | map('trim')
-            | reject('match', '')
+            | reject('equalto', '')
             | reject('match', '^#')
             | select('match', '^[A-Za-z_][A-Za-z0-9_]*=')
             | list
@@ -43,8 +43,9 @@
 
     - name: Build Proxmox API env map
       ansible.builtin.set_fact:
-        proxmox_api_env: "{{ proxmox_api_env | default({}) | combine({item.split('=', 1)[0]: item.split('=', 1)[1]}) }}"
+        proxmox_api_env: "{{ proxmox_api_env | default({}) | combine({(item | regex_replace('=.*$', '')): (item | regex_replace('^[^=]*=', ''))}) }}"
       loop: "{{ proxmox_api_env_lines }}"
+      when: "'=' in item"
       no_log: true
 
     - name: Assert required Proxmox API variables are present
