@@ -4,6 +4,7 @@
   gather_facts: false
 
   vars:
+    proxmox_api_env_file: /root/cyberlab-infra/private/secrets/proxmox-api.env
     proxmox_version_endpoint: "/version"
 
   tasks:
