@@ -139,6 +139,17 @@
       loop_control:
         label: "{{ item.name }}"
 
+    - name: Read controller SSH public key from controller key path on Proxmox host
+      ansible.builtin.slurp:
+        src: /root/.ssh/id_ed25519_controller.pub
+      register: controller_template_pubkey
+
+    - name: Write controller SSH public key to temporary file for qm sshkey import
+      ansible.builtin.copy:
+        dest: /tmp/controller-template-key.pub
+        mode: "0644"
+        content: "{{ controller_template_pubkey.content | b64decode }}"
+
     - name: Configure template VM defaults
       ansible.builtin.command:
         argv:
@@ -159,6 +170,8 @@
           - "{{ 1 if item.ci_upgrade else 0 }}"
           - --ipconfig0
           - "{{ item.ipconfig0 }}"
+          - --sshkey
+          - /tmp/controller-template-key.pub
           - --description
           - "{{ item.description }}"
           - --tags
@@ -167,6 +180,11 @@
       loop_control:
         label: "{{ item.name }}"
       changed_when: true
+
+    - name: Remove temporary controller SSH public key file
+      ansible.builtin.file:
+        path: /tmp/controller-template-key.pub
+        state: absent
 
     - name: Remove empty serial0 argument for non-serial templates
       ansible.builtin.command:
