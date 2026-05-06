@@ -139,16 +139,23 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Read controller SSH public key from controller key path on Proxmox host
-      ansible.builtin.slurp:
-        src: /root/.ssh/id_ed25519_controller.pub
+    - name: Read controller SSH public key from controller CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "800"
+          - --
+          - cat
+          - /root/.ssh/id_ed25519_controller.pub
       register: controller_template_pubkey
+      changed_when: false
 
     - name: Write controller SSH public key to temporary file for qm sshkey import
       ansible.builtin.copy:
         dest: /tmp/controller-template-key.pub
         mode: "0644"
-        content: "{{ controller_template_pubkey.content | b64decode }}"
+        content: "{{ controller_template_pubkey.stdout }}"
 
     - name: Configure template VM defaults
       ansible.builtin.command:
