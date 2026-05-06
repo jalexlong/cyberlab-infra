@@ -4,7 +4,10 @@ set -euo pipefail
 REPO_DIR_DEFAULT="/root/cyberlab-infra"
 ANSIBLE_DIR_REL="ansible"
 INVENTORY_FILE="inventory.yml"
-PLAYBOOK_FILE="playbooks/host-bootstrap.yml"
+HOST_BOOTSTRAP_PLAYBOOK="playbooks/host-bootstrap.yml"
+CONTROLLER_VALIDATE_PLAYBOOK="playbooks/controller-validate-proxmox-api.yml"
+CONTROLLER_SDN_PLAYBOOK="playbooks/controller-bootstrap-sdn.yml"
+CONTROLLER_CTID="800"
 
 log() {
   printf '[cyberlab-install] %s\n' "$*"
@@ -20,15 +23,11 @@ need_cmd() {
 }
 
 require_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    fail "Run this installer as root on the Proxmox host."
-  fi
+  [ "$(id -u)" -eq 0 ] || fail "Run this installer as root on the Proxmox host."
 }
 
 require_proxmox() {
-  if ! command -v pveversion >/dev/null 2>&1; then
-    fail "This does not appear to be a Proxmox VE host."
-  fi
+  command -v pveversion >/dev/null 2>&1 || fail "This does not appear to be a Proxmox VE host."
 }
 
 install_host_prereqs() {
@@ -41,7 +40,7 @@ install_host_prereqs() {
 resolve_repo_dir() {
   if [ -n "${CYBERLAB_REPO_DIR:-}" ]; then
     REPO_DIR="${CYBERLAB_REPO_DIR}"
-  elif [ -f "./${ANSIBLE_DIR_REL}/${PLAYBOOK_FILE}" ]; then
+  elif [ -f "./${ANSIBLE_DIR_REL}/${HOST_BOOTSTRAP_PLAYBOOK}" ]; then
     REPO_DIR="$(pwd)"
   else
     REPO_DIR="${REPO_DIR_DEFAULT}"
@@ -64,7 +63,9 @@ clone_or_update_repo() {
 }
 
 assert_repo_layout() {
-  [ -f "${REPO_DIR}/${ANSIBLE_DIR_REL}/${PLAYBOOK_FILE}" ] || fail "Could not find ${ANSIBLE_DIR_REL}/${PLAYBOOK_FILE}"
+  [ -f "${REPO_DIR}/${ANSIBLE_DIR_REL}/${HOST_BOOTSTRAP_PLAYBOOK}" ] || fail "Could not find ${ANSIBLE_DIR_REL}/${HOST_BOOTSTRAP_PLAYBOOK}"
+  [ -f "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_VALIDATE_PLAYBOOK}" ] || fail "Could not find ${ANSIBLE_DIR_REL}/${CONTROLLER_VALIDATE_PLAYBOOK}"
+  [ -f "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_SDN_PLAYBOOK}" ] || fail "Could not find ${ANSIBLE_DIR_REL}/${CONTROLLER_SDN_PLAYBOOK}"
   [ -f "${REPO_DIR}/${ANSIBLE_DIR_REL}/${INVENTORY_FILE}" ] || fail "Could not find ${ANSIBLE_DIR_REL}/${INVENTORY_FILE}"
 }
 
@@ -73,26 +74,47 @@ run_host_bootstrap() {
   cd "${REPO_DIR}/${ANSIBLE_DIR_REL}"
   export LANG=C.UTF-8
   export LC_ALL=C.UTF-8
-  ansible-playbook -i "${INVENTORY_FILE}" "${PLAYBOOK_FILE}"
+  ansible-playbook -i "${INVENTORY_FILE}" "${HOST_BOOTSTRAP_PLAYBOOK}"
 }
 
-show_next_steps() {
+assert_controller_running() {
+  log "Checking controller CT ${CONTROLLER_CTID}"
+  pct status "${CONTROLLER_CTID}" | grep -q "status: running" || fail "Controller CT ${CONTROLLER_CTID} is not running."
+}
+
+run_controller_playbook() {
+  local playbook="$1"
+  log "Running ${playbook} inside controller CT ${CONTROLLER_CTID}"
+  pct exec "${CONTROLLER_CTID}" -- bash -lc \
+    "cd /root/cyberlab-infra/${ANSIBLE_DIR_REL} && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-playbook -i ${INVENTORY_FILE} ${playbook}"
+}
+
+run_controller_validation() {
+  run_controller_playbook "${CONTROLLER_VALIDATE_PLAYBOOK}"
+}
+
+run_controller_sdn_bootstrap() {
+  run_controller_playbook "${CONTROLLER_SDN_PLAYBOOK}"
+}
+
+show_success_summary() {
   cat <<'EOF'
 
-[cyberlab-install] Install phase complete.
+[cyberlab-install] Platform bootstrap complete.
 
-Expected results:
-- Proxmox automation user/token created
-- Controller CT 800 created and bootstrapped
-- Controller trust handoff established
-- Controller ready for validation and SDN bootstrap
+Completed phases:
+- Proxmox host bootstrap
+- Controller CT 800 bootstrap
+- Controller SSH trust bootstrap
+- Proxmox API validation from controller
+- SDN zone and VNET bootstrap
 
-Recommended verification on the Proxmox host:
+Useful checks:
   pct status 800
-  pct exec 800 -- bash -lc 'cd /root/cyberlab-infra/ansible && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-playbook -i inventory.yml playbooks/controller-validate-proxmox-api.yml'
+  pct exec 800 -- bash -lc 'source /root/cyberlab-infra/private/secrets/proxmox-api.env && curl -sk -H "Authorization: PVEAPIToken=${PROXMOX_API_TOKEN_ID}=${PROXMOX_API_TOKEN_SECRET}" "${PROXMOX_API_URL}/version"'
 
-When controller API validation passes, bootstrap SDN with:
-  pct exec 800 -- bash -lc 'cd /root/cyberlab-infra/ansible && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml'
+Next recommended milestone:
+- automate template creation and promotion
 EOF
 }
 
@@ -100,12 +122,16 @@ main() {
   require_root
   require_proxmox
   need_cmd apt-get
+  need_cmd pct
   install_host_prereqs
   resolve_repo_dir
   clone_or_update_repo
   assert_repo_layout
   run_host_bootstrap
-  show_next_steps
+  assert_controller_running
+  run_controller_validation
+  run_controller_sdn_bootstrap
+  show_success_summary
 }
 
 main "$@"
