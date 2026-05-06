@@ -1,0 +1,142 @@
+template_catalog:
+  - name: tpl-debian13-base
+    vmid: 900
+    build_method: cloud_image
+    enabled: true
+    os_family: debian
+    version: "13"
+    image_url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+    image_filename: debian-13-genericcloud-amd64.qcow2
+    target_node: pve1
+    memory: 2048
+    cores: 2
+    sockets: 1
+    cpu: x86-64-v2-AES
+    machine: q35
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+    bridge: vmbr0
+    net_model: virtio
+    serial_socket: true
+    vga: serial0
+    agent_enabled: true
+    ci_user: cyberlab
+    ci_upgrade: true
+    ipconfig0: ip=dhcp
+    boot: order=scsi0
+    description: "Cyberlab Debian 13 base template"
+    tags: "template;debian13;linux;base"
+
+  - name: tpl-ubuntu2604-base
+    vmid: 901
+    build_method: cloud_image
+    enabled: false
+    os_family: ubuntu
+    version: "26.04"
+    image_url: ""
+    image_filename: ""
+    target_node: pve1
+    memory: 2048
+    cores: 2
+    sockets: 1
+    cpu: x86-64-v2-AES
+    machine: q35
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+    bridge: vmbr0
+    net_model: virtio
+    serial_socket: true
+    vga: serial0
+    agent_enabled: true
+    ci_user: cyberlab
+    ci_upgrade: true
+    ipconfig0: ip=dhcp
+    boot: order=scsi0
+    description: "Cyberlab Ubuntu 26.04 base template"
+    tags: "template;ubuntu2604;linux;base"
+
+  - name: tpl-parrot-base
+    vmid: 902
+    build_method: qcow_import
+    enabled: false
+    os_family: parrot
+    version: "current"
+    image_url: ""
+    image_filename: ""
+    target_node: pve1
+    memory: 2048
+    cores: 2
+    sockets: 1
+    cpu: x86-64-v2-AES
+    machine: q35
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+    bridge: vmbr0
+    net_model: virtio
+    serial_socket: true
+    vga: serial0
+    agent_enabled: true
+    ci_user: cyberlab
+    ci_upgrade: true
+    ipconfig0: ip=dhcp
+    boot: order=scsi0
+    description: "Cyberlab Parrot base template"
+    tags: "template;parrot;linux;base"
+
+  - name: tpl-win7-base
+    vmid: 910
+    build_method: iso_install
+    enabled: false
+    os_family: windows
+    version: "7"
+    image_url: ""
+    image_filename: ""
+    target_node: pve1
+    memory: 4096
+    cores: 2
+    sockets: 1
+    cpu: x86-64-v2-AES
+    machine: q35
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+    bridge: vmbr0
+    net_model: e1000
+    serial_socket: false
+    vga: std
+    agent_enabled: false
+    description: "Cyberlab Windows 7 base template"
+    tags: "template;win7;windows;base"
+
+  - name: tpl-metasploitable2-base
+    vmid: 911
+    build_method: legacy_appliance
+    enabled: false
+    os_family: ubuntu
+    version: "metasploitable2"
+    image_url: ""
+    image_filename: ""
+    target_node: pve1
+    memory: 1024
+    cores: 1
+    sockets: 1
+    cpu: x86-64-v2-AES
+    machine: pc
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+    bridge: vmbr0
+    net_model: e1000
+    serial_socket: false
+    vga: std
+    agent_enabled: false
+    description: "Cyberlab Metasploitable 2 base template"
+    tags: "template;metasploitable2;legacy;base"
