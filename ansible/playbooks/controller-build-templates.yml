@@ -183,29 +183,6 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Check whether VM is already a template
-      ansible.builtin.shell: >
-        qm config {{ item.vmid }} | grep -q '^template: 1$'
-      args:
-        executable: /bin/bash
-      register: template_flag_results
-      failed_when: false
-      changed_when: false
-      loop: "{{ enabled_cloud_templates }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Convert VM to template
-      ansible.builtin.command:
-        argv:
-          - qm
-          - template
-          - "{{ item.item.vmid | string }}"
-      when: item.rc != 0
-      loop: "{{ template_flag_results.results }}"
-      loop_control:
-        label: "{{ item.item.name }}"
-
     - name: Show resulting template configs
       ansible.builtin.command:
         argv:

@@ -1,0 +1,149 @@
+---
+- name: Finalize Cyberlab Debian template before promotion
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  vars:
+    finalize_template_name: tpl-debian13-base
+
+  tasks:
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: >-
+          {{
+            (template_catalog | selectattr('name', 'equalto', finalize_template_name) | list | first)
+          }}
+
+    - name: Assert template definition exists
+      ansible.builtin.assert:
+        that:
+          - template_def is defined
+          - template_def.vmid is defined
+        fail_msg: "Template definition for {{ finalize_template_name }} was not found."
+
+    - name: Assert template is not already marked as a template
+      ansible.builtin.shell: >
+        qm config {{ template_def.vmid }} | grep -q '^template: 1$'
+      args:
+        executable: /bin/bash
+      register: template_flag_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if VM is already converted to template
+      ansible.builtin.assert:
+        that:
+          - template_flag_check.rc != 0
+        fail_msg: >
+          VM {{ template_def.vmid }} is already a Proxmox template.
+          Clone it back to a working VM or rebuild it before running finalization.
+
+    - name: Start template source VM
+      ansible.builtin.command:
+        argv:
+          - qm
+          - start
+          - "{{ template_def.vmid | string }}"
+      register: qm_start_result
+      failed_when: false
+      changed_when: qm_start_result.rc == 0
+
+    - name: Wait for QEMU guest agent ping
+      ansible.builtin.command:
+        argv:
+          - qm
+          - guest
+          - ping
+          - "{{ template_def.vmid | string }}"
+      register: guest_ping
+      retries: 30
+      delay: 10
+      until: guest_ping.rc == 0
+      changed_when: false
+
+    - name: Install qemu-guest-agent and cloud-init, then clean machine state
+      ansible.builtin.command:
+        argv:
+          - qm
+          - guest
+          - exec
+          - "{{ template_def.vmid | string }}"
+          - --
+          - bash
+          - -lc
+          - |
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y qemu-guest-agent cloud-init sudo curl
+            systemctl enable qemu-guest-agent || true
+            truncate -s 0 /etc/machine-id
+            rm -f /var/lib/dbus/machine-id
+            rm -f /etc/ssh/ssh_host_*
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            rm -rf /tmp/*
+            rm -rf /var/tmp/*
+            rm -f /root/.bash_history
+      register: guest_finalize_exec
+      changed_when: guest_finalize_exec.rc == 0
+
+    - name: Sync guest filesystem
+      ansible.builtin.command:
+        argv:
+          - qm
+          - guest
+          - exec
+          - "{{ template_def.vmid | string }}"
+          - --
+          - bash
+          - -lc
+          - sync
+      changed_when: false
+      failed_when: false
+
+    - name: Shut down template source VM
+      ansible.builtin.command:
+        argv:
+          - qm
+          - shutdown
+          - "{{ template_def.vmid | string }}"
+      register: qm_shutdown_result
+      failed_when: false
+      changed_when: qm_shutdown_result.rc == 0
+
+    - name: Wait for template source VM to stop
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_status_wait
+      retries: 30
+      delay: 10
+      until: "'status: stopped' in qm_status_wait.stdout"
+      changed_when: false
+
+    - name: Convert finalized VM to template
+      ansible.builtin.command:
+        argv:
+          - qm
+          - template
+          - "{{ template_def.vmid | string }}"
+      register: qm_template_result
+      changed_when: qm_template_result.rc == 0
+
+    - name: Show finalized template config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ template_def.vmid | string }}"
+      register: final_template_config
+      changed_when: false
+
+    - name: Print finalized template summary
+      ansible.builtin.debug:
+        msg: "{{ final_template_config.stdout_lines }}"
