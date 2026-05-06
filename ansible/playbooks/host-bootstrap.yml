@@ -359,7 +359,7 @@
           - --
           - bash
           - -lc
-          - "ssh -i {{ controller_ssh_key_path }} -o StrictHostKeyChecking=no root@{{ ansible_host | default(inventory_hostname) }} hostname"
+          - "ssh -i {{ controller_ssh_key_path }} -o StrictHostKeyChecking=no root@{{ proxmox_api_host }} hostname"
       register: controller_ssh_validation
       changed_when: false
       become: true
