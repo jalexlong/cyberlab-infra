@@ -4,3 +4,15 @@ all:
       hosts:
         localhost:
           ansible_connection: local
+
+    controller:
+      hosts:
+        localhost:
+          ansible_connection: local
+
+    proxmox_targets:
+      hosts:
+        pve1:
+          ansible_host: 10.64.62.200
+          ansible_user: root
+          ansible_ssh_private_key_file: /root/.ssh/id_ed25519_controller

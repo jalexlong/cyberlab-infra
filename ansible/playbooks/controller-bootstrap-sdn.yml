@@ -1,6 +1,6 @@
 ---
 - name: Bootstrap Proxmox SDN from controller
-  hosts: pve1
+  hosts: proxmox_targets
   gather_facts: false
 
   vars:
