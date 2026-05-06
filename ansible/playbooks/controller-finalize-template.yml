@@ -69,31 +69,55 @@
       ansible.builtin.pause:
         seconds: 45
 
-    - name: Get DHCP lease / IP from cloud-init VM
-      ansible.builtin.shell: >
-        qm guest cmd {{ template_def.vmid }} network-get-interfaces 2>/dev/null |
-        python3 - <<'PY'
-        import json, sys
-        data = json.load(sys.stdin)
-        for iface in data:
-            for addr in iface.get("ip-addresses", []):
-                ip = addr.get("ip-address")
-                if ip and "." in ip and not ip.startswith("127."):
-                    print(ip)
-                    raise SystemExit(0)
-        raise SystemExit(1)
-        PY
+    - name: Probe common lab networks for guest SSH
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for subnet in \
+          10.64.62 \
+          10.0.11 \
+          10.0.12 \
+          10.10.11 \
+          10.10.12 \
+          10.10.13 \
+          10.10.14 \
+          10.10.21 \
+          10.10.22 \
+          10.10.23 \
+          10.10.24 \
+          10.20.11 \
+          10.20.12 \
+          10.20.13 \
+          10.20.14 \
+          10.20.21 \
+          10.20.22 \
+          10.20.23 \
+          10.20.24
+        do
+          for host in $(seq 2 254); do
+            ip="${subnet}.${host}"
+            if timeout 2 ssh -i {{ finalize_ssh_private_key }} \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o BatchMode=yes \
+              -o ConnectTimeout=2 \
+              {{ finalize_ssh_user }}@"${ip}" 'echo ok' 2>/dev/null | grep -q '^ok$'; then
+              echo "${ip}"
+              exit 0
+            fi
+          done
+        done
+        exit 1
       args:
         executable: /bin/bash
       register: guest_ip_result
-      retries: 18
-      delay: 10
+      retries: 6
+      delay: 20
       until: guest_ip_result.rc == 0
       changed_when: false
 
     - name: Set guest IP fact
       ansible.builtin.set_fact:
-        template_guest_ip: "{{ guest_ip_result.stdout_lines[0] | trim }}"
+        template_guest_ip: "{{ guest_ip_result.stdout | trim }}"
 
     - name: Wait for SSH on guest
       ansible.builtin.wait_for:

@@ -90,7 +90,7 @@ template_catalog:
     tags: "template;parrot;linux;base"
 
   - name: tpl-win7-base
-    vmid: 910
+    vmid: 903
     build_method: iso_install
     enabled: false
     os_family: windows
@@ -116,7 +116,7 @@ template_catalog:
     tags: "template;win7;windows;base"
 
   - name: tpl-metasploitable2-base
-    vmid: 911
+    vmid: 904
     build_method: legacy_appliance
     enabled: false
     os_family: ubuntu
