@@ -38,7 +38,8 @@ install_packages() {
 
 install_opentofu() {
   if command -v tofu >/dev/null 2>&1; then
-    echo "OpenTofu already installed: $(tofu version | head -n 1)"
+    tofu_version="$(tofu version | sed -n '1p')"
+    echo "OpenTofu already installed: $(tofu_version)"
     return
   fi
 
@@ -93,8 +94,10 @@ print_summary() {
   echo "Private dir: ${PRIVATE_DIR}"
   echo "Secrets dir: ${SECRETS_DIR}"
   echo
-  ansible --version | head -n 1
-  tofu version | head -n 1
+  ansible_version="$(ansible --version | sed -n '1p')"
+  echo "$ansible_version"
+  tofu_version="$(tofu version | sed -n '1p')"
+  echo "$tofu_version"
   python3 --version
   echo
   echo "Next:"
