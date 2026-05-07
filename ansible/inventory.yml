@@ -18,6 +18,8 @@ all:
           subnet: 10.30.0.0/24
           gateway: 10.30.0.1
           snat: true
+          dhcp_start: 10.30.0.100
+          dhcp_end: 10.30.0.199
 
   children:
     proxmox_hosts:
