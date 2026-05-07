@@ -68,7 +68,7 @@
       ansible.builtin.debug:
         msg:
           - "image_path={{ image_cache_dir }}/{{ template_def.image_filename }}"
-          - "cached={{ cached_image_stat.stst.exists }}"
+          - "cached={{ cached_image_stat.stat.exists }}"
 
     - name: Download cloud image if missing
       ansible.builtin.get_url:
