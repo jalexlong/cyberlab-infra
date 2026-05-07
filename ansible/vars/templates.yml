@@ -18,7 +18,7 @@ template_catalog:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
-    bridge: vmbr0
+    bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
@@ -49,7 +49,7 @@ template_catalog:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
-    bridge: vmbr0
+    bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
@@ -80,7 +80,7 @@ template_catalog:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
-    bridge: vmbr0
+    bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
@@ -111,7 +111,7 @@ template_catalog:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
-    bridge: vmbr0
+    bridge: prov0
     net_model: e1000
     serial_socket: false
     vga: std
@@ -138,7 +138,7 @@ template_catalog:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
-    bridge: vmbr0
+    bridge: prov0
     net_model: e1000
     serial_socket: false
     vga: std

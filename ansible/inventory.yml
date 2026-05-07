@@ -1,4 +1,24 @@
 all:
+  vars:
+    proxmox_sdn:
+      zone:
+        name: virtnet
+        type: simple
+        dhcp: dnsmasq
+        ipam: pve
+        mtu: 1460
+
+      vnets:
+        - name: prov0
+          alias: Provisioning Network
+          isolate_ports: false
+
+      subnets:
+        - name: prov0
+          subnet: 10.30.0.0/24
+          gateway: 10.30.0.1
+          snat: true
+
   children:
     proxmox_hosts:
       hosts:
