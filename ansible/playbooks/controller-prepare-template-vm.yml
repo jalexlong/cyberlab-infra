@@ -7,7 +7,7 @@
     - ../vars/templates.yml
 
   vars:
-    template_name: "{{ template_name | default('tpl-debian13-base') }}"
+    selected_template_name: "{{ template_name | default('tpl-debian13-base') }}"
     image_cache_dir: /var/lib/vz/template/qcow2
     controller_pubkey_path_in_ct: /root/.ssh/id_ed25519_controller.pub
 
@@ -16,8 +16,9 @@
       ansible.builtin.set_fact:
         template_def: >-
           {{
-            (template_catalog | selectattr('name', 'equalto', template_name) | list | first)
+            (template_catalog | selectattr('name', 'equalto', selected_template_name) | list | first)
           }}
+
 
     - name: Assert template definition exists
       ansible.builtin.assert:
@@ -30,7 +31,7 @@
           - template_def.disk_storage is defined
           - template_def.cloudinit_storage is defined
           - template_def.bridge is defined
-        fail_msg: "Template definition for {{ template_name }} is missing required keys."
+        fail_msg: "Template definition for {{ selected_template_name }} is missing required keys."
 
     - name: Assert template VMID is in template range
       ansible.builtin.assert:

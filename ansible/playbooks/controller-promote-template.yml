@@ -7,14 +7,14 @@
     - ../vars/templates.yml
 
   vars:
-    template_name: "{{ template_name | default('tpl-debian13-base') }}"
+    selected_template_name: "{{ template_name | default('tpl-debian13-base') }}"
 
   tasks:
     - name: Select template definition
       ansible.builtin.set_fact:
         template_def: >-
           {{
-            (template_catalog | selectattr('name', 'equalto', template_name) | list | first)
+            (template_catalog | selectattr('name', 'equalto', selected_template_name) | list | first)
           }}
 
     - name: Assert template definition exists
@@ -22,7 +22,7 @@
         that:
           - template_def is defined
           - template_def.vmid is defined
-        fail_msg: "Template definition for {{ template_name }} was not found."
+        fail_msg: "Template definition for {{ selected_template_name }} was not found."
 
     - name: Assert template VMID is in template range
       ansible.builtin.assert:
