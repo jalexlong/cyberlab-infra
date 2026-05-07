@@ -200,7 +200,7 @@
           - --ciupgrade
           - "{{ 1 if template_def.ci_upgrade else 0 }}"
           - --ipconfig0
-          - "{{ template_def.ipconfig0 }}"
+          - "{{ template_def.bootstrap_ipconfig0 | default(template_def.ipconfig0) }}"
           - --sshkey
           - /tmp/controller-template-key.pub
           - --description

@@ -84,33 +84,9 @@
       ansible.builtin.pause:
         seconds: 45
 
-    - name: Probe provisioning subnet for SSH access
-      ansible.builtin.shell: |
-        set -euo pipefail
-        for host in $(seq 2 254); do
-          ip="{{ finalize_probe_subnet }}.${host}"
-          if timeout 2 ssh -i {{ finalize_ssh_private_key }} \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o BatchMode=yes \
-            -o ConnectTimeout=2 \
-            {{ finalize_ssh_user }}@"${ip}" 'echo ok' 2>/dev/null | grep -q '^ok$'; then
-            echo "${ip}"
-            exit 0
-          fi
-        done
-        exit 1
-      args:
-        executable: /bin/bash
-      register: guest_ip_result
-      retries: 8
-      delay: 15
-      until: guest_ip_result.rc == 0
-      changed_when: false
-
-    - name: Set guest IP fact
+    - name: Set guest IP fact from template bootstrap IP
       ansible.builtin.set_fact:
-        template_guest_ip: "{{ guest_ip_result.stdout | trim }}"
+        template_guest_ip: "{{ template_def.bootstrap_ip }}"
 
     - name: Wait for SSH port
       ansible.builtin.wait_for:
