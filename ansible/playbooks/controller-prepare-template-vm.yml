@@ -59,12 +59,19 @@
           - template_def.image_filename | length > 0
         fail_msg: "This prepare playbook currently supports cloud_image templates only."
 
+    - name: Check whether cloud image is already cached
+      ansible.builtin.stat:
+        path: "{{ image_cache_dir }}/{{ template_def.image_filename }}"
+      register: cached_image_stat
+
     - name: Download cloud image if missing
       ansible.builtin.get_url:
         url: "{{ template_def.image_url }}"
         dest: "{{ image_cache_dir }}/{{ template_def.image_filename }}"
         mode: "0644"
         force: false
+        timeout: 120
+      when: not cached_image_stat.stat.exists
 
     - name: Check whether VM already exists
       ansible.builtin.command:
