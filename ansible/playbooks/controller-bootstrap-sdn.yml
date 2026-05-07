@@ -73,15 +73,16 @@
 
     - name: Check whether subnet exists
       ansible.builtin.shell: |
-        pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json | python3 - <<'PY'
+        pvesh get /cluster/sdn/subnets --output-format json | python3 - <<'PY'
         import json
         import sys
 
         data = json.load(sys.stdin)
-        target = "{{ item.subnet }}"
+        target_vnet = "{{ item.name }}"
+        target_subnet = "{{ item.subnet }}"
 
         for entry in data:
-            if entry.get("subnet") == target:
+            if entry.get("vnet") == target_vnet and entry.get("subnet") == target_subnet:
                 raise SystemExit(0)
 
         raise SystemExit(1)
