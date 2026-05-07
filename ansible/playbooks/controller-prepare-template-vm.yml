@@ -1,0 +1,234 @@
+---
+- name: Prepare template VM on Proxmox host
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  vars:
+    template_name: "{{ template_name | default('tpl-debian13-base') }}"
+    image_cache_dir: /var/lib/vz/template/qcow2
+    controller_pubkey_path_in_ct: /root/.ssh/id_ed25519_controller.pub
+
+  tasks:
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: >-
+          {{
+            (template_catalog | selectattr('name', 'equalto', template_name) | list | first)
+          }}
+
+    - name: Assert template definition exists
+      ansible.builtin.assert:
+        that:
+          - template_def is defined
+          - template_def.name is defined
+          - template_def.vmid is defined
+          - template_def.build_method is defined
+          - template_def.target_node is defined
+          - template_def.disk_storage is defined
+          - template_def.cloudinit_storage is defined
+          - template_def.bridge is defined
+        fail_msg: "Template definition for {{ template_name }} is missing required keys."
+
+    - name: Assert template VMID is in template range
+      ansible.builtin.assert:
+        that:
+          - template_def.vmid | int >= 900
+          - template_def.vmid | int <= 949
+        fail_msg: "Template VMID {{ template_def.vmid }} must be in the 900-949 range."
+
+    - name: Assert build method is supported
+      ansible.builtin.assert:
+        that:
+          - template_def.build_method in ['cloud_image', 'qcow_import', 'iso_install', 'legacy_appliance']
+        fail_msg: "Unsupported build_method {{ template_def.build_method }}."
+
+    - name: Ensure image cache directory exists
+      ansible.builtin.file:
+        path: "{{ image_cache_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Assert current template uses cloud image flow
+      ansible.builtin.assert:
+        that:
+          - template_def.build_method == 'cloud_image'
+          - template_def.image_url | length > 0
+          - template_def.image_filename | length > 0
+        fail_msg: "This prepare playbook currently supports cloud_image templates only."
+
+    - name: Download cloud image if missing
+      ansible.builtin.get_url:
+        url: "{{ template_def.image_url }}"
+        dest: "{{ image_cache_dir }}/{{ template_def.image_filename }}"
+        mode: "0644"
+        force: false
+
+    - name: Check whether VM already exists
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_status_result
+      failed_when: false
+      changed_when: false
+
+    - name: Create VM shell if missing
+      ansible.builtin.command:
+        argv:
+          - qm
+          - create
+          - "{{ template_def.vmid | string }}"
+          - --name
+          - "{{ template_def.name }}"
+          - --memory
+          - "{{ template_def.memory | string }}"
+          - --cores
+          - "{{ template_def.cores | string }}"
+          - --sockets
+          - "{{ template_def.sockets | string }}"
+          - --cpu
+          - "{{ template_def.cpu }}"
+          - --machine
+          - "{{ template_def.machine }}"
+          - --bios
+          - "{{ template_def.bios }}"
+          - --scsihw
+          - "{{ template_def.scsihw }}"
+          - --net0
+          - "{{ template_def.net_model }},bridge={{ template_def.bridge }}"
+          - --agent
+          - "{{ 1 if template_def.agent_enabled else 0 }}"
+          - --ostype
+          - l26
+      when: qm_status_result.rc != 0
+
+    - name: Assert VM is not already a template
+      ansible.builtin.shell: >
+        qm config {{ template_def.vmid }} | grep -q '^template: 1$'
+      args:
+        executable: /bin/bash
+      register: template_flag_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if VM is already a template
+      ansible.builtin.assert:
+        that:
+          - template_flag_check.rc != 0
+        fail_msg: "VM {{ template_def.vmid }} is already a template. Do not run prepare on a promoted template."
+
+    - name: Check whether imported disk is already attached
+      ansible.builtin.shell: >
+        qm config {{ template_def.vmid }} | grep -q '^scsi0:'
+      args:
+        executable: /bin/bash
+      register: disk_present_result
+      failed_when: false
+      changed_when: false
+
+    - name: Import qcow2 disk if missing
+      ansible.builtin.command:
+        argv:
+          - qm
+          - importdisk
+          - "{{ template_def.vmid | string }}"
+          - "{{ image_cache_dir }}/{{ template_def.image_filename }}"
+          - "{{ template_def.disk_storage }}"
+      when: disk_present_result.rc != 0
+
+    - name: Attach imported disk to scsi0 if missing
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --scsi0
+          - "{{ template_def.disk_storage }}:vm-{{ template_def.vmid }}-disk-0,discard=on,ssd=1"
+      when: disk_present_result.rc != 0
+
+    - name: Read controller SSH public key from controller CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "800"
+          - --
+          - cat
+          - "{{ controller_pubkey_path_in_ct }}"
+      register: controller_template_pubkey
+      changed_when: false
+
+    - name: Write temporary controller SSH public key file
+      ansible.builtin.copy:
+        dest: /tmp/controller-template-key.pub
+        mode: "0644"
+        content: "{{ controller_template_pubkey.stdout }}"
+
+    - name: Configure template VM defaults
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --boot
+          - "{{ template_def.boot }}"
+          - --bootdisk
+          - scsi0
+          - --serial0
+          - "{{ 'socket' if template_def.serial_socket else '' }}"
+          - --vga
+          - "{{ template_def.vga }}"
+          - --ciuser
+          - "{{ template_def.ci_user }}"
+          - --ciupgrade
+          - "{{ 1 if template_def.ci_upgrade else 0 }}"
+          - --ipconfig0
+          - "{{ template_def.ipconfig0 }}"
+          - --sshkey
+          - /tmp/controller-template-key.pub
+          - --description
+          - "{{ template_def.description }}"
+          - --tags
+          - "{{ template_def.tags }}"
+      changed_when: true
+
+    - name: Attach cloud-init disk
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --ide2
+          - "{{ template_def.cloudinit_storage }}:cloudinit"
+      register: cloudinit_attach_result
+      failed_when: false
+      changed_when: cloudinit_attach_result.rc == 0
+
+    - name: Remove temporary controller SSH public key file
+      ansible.builtin.file:
+        path: /tmp/controller-template-key.pub
+        state: absent
+
+    - name: Show prepared VM config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ template_def.vmid | string }}"
+      register: prepared_vm_config
+      changed_when: false
+
+    - name: Print prepare summary
+      ansible.builtin.debug:
+        msg:
+          - "template_name={{ template_def.name }}"
+          - "vmid={{ template_def.vmid }}"
+          - "build_method={{ template_def.build_method }}"
+          - "prepared=true"
+          - "template_flag=false"
+          - "next_step=controller-finalize-template-vm.yml"
+          - "{{ prepared_vm_config.stdout }}"

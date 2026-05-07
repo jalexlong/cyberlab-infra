@@ -1,6 +1,7 @@
 template_catalog:
   - name: tpl-debian13-base
     vmid: 900
+    test_clone_vmid: 950
     build_method: cloud_image
     enabled: true
     os_family: debian
@@ -31,6 +32,7 @@ template_catalog:
 
   - name: tpl-ubuntu2604-base
     vmid: 901
+    test_clone_vmid: 951
     build_method: cloud_image
     enabled: false
     os_family: ubuntu
@@ -61,6 +63,7 @@ template_catalog:
 
   - name: tpl-parrot-base
     vmid: 902
+    test_clone_vmid: 952
     build_method: qcow_import
     enabled: false
     os_family: parrot
@@ -91,6 +94,7 @@ template_catalog:
 
   - name: tpl-win7-base
     vmid: 903
+    test_clone_vmid: 953
     build_method: iso_install
     enabled: false
     os_family: windows
@@ -117,6 +121,7 @@ template_catalog:
 
   - name: tpl-metasploitable2-base
     vmid: 904
+    test_clone_vmid: 954
     build_method: legacy_appliance
     enabled: false
     os_family: ubuntu

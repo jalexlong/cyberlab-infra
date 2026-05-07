@@ -1,0 +1,186 @@
+---
+- name: Finalize template VM guest customization
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  vars:
+    template_name: "{{ template_name | default('tpl-debian13-base') }}"
+    finalize_ssh_private_key: /root/.ssh/id_ed25519_controller
+    finalize_ssh_user: cyberlab
+    finalize_probe_subnet: 10.64.62
+
+  tasks:
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: >-
+          {{
+            (template_catalog | selectattr('name', 'equalto', template_name) | list | first)
+          }}
+
+    - name: Assert template definition exists
+      ansible.builtin.assert:
+        that:
+          - template_def is defined
+          - template_def.vmid is defined
+        fail_msg: "Template definition for {{ template_name }} was not found."
+
+    - name: Assert template VMID is in template range
+      ansible.builtin.assert:
+        that:
+          - template_def.vmid | int >= 900
+          - template_def.vmid | int <= 949
+        fail_msg: "Template VMID {{ template_def.vmid }} must be in the 900-949 range."
+
+    - name: Check whether VM exists
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_status_result
+      changed_when: false
+
+    - name: Check whether VM is already a template
+      ansible.builtin.shell: >
+        qm config {{ template_def.vmid }} | grep -q '^template: 1$'
+      args:
+        executable: /bin/bash
+      register: template_flag_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if VM is already a template
+      ansible.builtin.assert:
+        that:
+          - template_flag_check.rc != 0
+        fail_msg: "VM {{ template_def.vmid }} is already a template. Finalize must run before promote."
+
+    - name: Start VM if not already running
+      ansible.builtin.command:
+        argv:
+          - qm
+          - start
+          - "{{ template_def.vmid | string }}"
+      register: qm_start_result
+      failed_when: false
+      changed_when: qm_start_result.rc == 0
+
+    - name: Wait for VM to be running
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_running_wait
+      retries: 12
+      delay: 5
+      until: "'status: running' in qm_running_wait.stdout"
+      changed_when: false
+
+    - name: Pause for cloud-init boot
+      ansible.builtin.pause:
+        seconds: 45
+
+    - name: Probe management subnet for SSH access
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for host in $(seq 2 254); do
+          ip="{{ finalize_probe_subnet }}.${host}"
+          if timeout 2 ssh -i {{ finalize_ssh_private_key }} \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes \
+            -o ConnectTimeout=2 \
+            {{ finalize_ssh_user }}@"${ip}" 'echo ok' 2>/dev/null | grep -q '^ok$'; then
+            echo "${ip}"
+            exit 0
+          fi
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: guest_ip_result
+      retries: 8
+      delay: 15
+      until: guest_ip_result.rc == 0
+      changed_when: false
+
+    - name: Set guest IP fact
+      ansible.builtin.set_fact:
+        template_guest_ip: "{{ guest_ip_result.stdout | trim }}"
+
+    - name: Wait for SSH port
+      ansible.builtin.wait_for:
+        host: "{{ template_guest_ip }}"
+        port: 22
+        delay: 2
+        timeout: 120
+
+    - name: Finalize guest over SSH
+      ansible.builtin.shell: >
+        ssh -i {{ finalize_ssh_private_key }}
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        {{ finalize_ssh_user }}@{{ template_guest_ip }}
+        'sudo bash -lc "
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y qemu-guest-agent cloud-init sudo curl
+        systemctl enable qemu-guest-agent || true
+        systemctl enable cloud-init || true
+        systemctl enable cloud-init-local || true
+        systemctl enable cloud-config || true
+        systemctl enable cloud-final || true
+        cloud-init clean --logs || true
+        truncate -s 0 /etc/machine-id
+        rm -f /var/lib/dbus/machine-id
+        rm -f /etc/ssh/ssh_host_*
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+        rm -rf /tmp/*
+        rm -rf /var/tmp/*
+        rm -f /root/.bash_history
+        rm -f /home/{{ finalize_ssh_user }}/.bash_history
+        sync
+        "'
+      args:
+        executable: /bin/bash
+      register: guest_finalize_result
+      changed_when: guest_finalize_result.rc == 0
+
+    - name: Shut down guest
+      ansible.builtin.shell: >
+        ssh -i {{ finalize_ssh_private_key }}
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        {{ finalize_ssh_user }}@{{ template_guest_ip }}
+        'sudo shutdown -h now'
+      args:
+        executable: /bin/bash
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for VM to stop
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_stopped_wait
+      retries: 30
+      delay: 10
+      until: "'status: stopped' in qm_stopped_wait.stdout"
+      changed_when: false
+
+    - name: Print finalize summary
+      ansible.builtin.debug:
+        msg:
+          - "template_name={{ template_def.name }}"
+          - "vmid={{ template_def.vmid }}"
+          - "guest_ip={{ template_guest_ip }}"
+          - "finalized=true"
+          - "vm_stopped=true"
+          - "next_step=controller-promote-template.yml"

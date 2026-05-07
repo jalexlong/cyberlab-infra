@@ -1,0 +1,84 @@
+---
+- name: Promote finalized VM to Proxmox template
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  vars:
+    template_name: "{{ template_name | default('tpl-debian13-base') }}"
+
+  tasks:
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: >-
+          {{
+            (template_catalog | selectattr('name', 'equalto', template_name) | list | first)
+          }}
+
+    - name: Assert template definition exists
+      ansible.builtin.assert:
+        that:
+          - template_def is defined
+          - template_def.vmid is defined
+        fail_msg: "Template definition for {{ template_name }} was not found."
+
+    - name: Assert template VMID is in template range
+      ansible.builtin.assert:
+        that:
+          - template_def.vmid | int >= 900
+          - template_def.vmid | int <= 949
+        fail_msg: "Template VMID {{ template_def.vmid }} must be in the 900-949 range."
+
+    - name: Assert VM is stopped before promotion
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.vmid | string }}"
+      register: qm_status_result
+      changed_when: false
+
+    - name: Fail if VM is not stopped
+      ansible.builtin.assert:
+        that:
+          - "'status: stopped' in qm_status_result.stdout"
+        fail_msg: "VM {{ template_def.vmid }} must be stopped before promotion."
+
+    - name: Check whether VM is already a template
+      ansible.builtin.shell: >
+        qm config {{ template_def.vmid }} | grep -q '^template: 1$'
+      args:
+        executable: /bin/bash
+      register: template_flag_check
+      failed_when: false
+      changed_when: false
+
+    - name: Convert VM to template if needed
+      ansible.builtin.command:
+        argv:
+          - qm
+          - template
+          - "{{ template_def.vmid | string }}"
+      when: template_flag_check.rc != 0
+      register: promote_result
+      changed_when: promote_result.rc == 0
+
+    - name: Show promoted template config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ template_def.vmid | string }}"
+      register: final_template_config
+      changed_when: false
+
+    - name: Print promotion summary
+      ansible.builtin.debug:
+        msg:
+          - "template_name={{ template_def.name }}"
+          - "vmid={{ template_def.vmid }}"
+          - "promoted=true"
+          - "template_flag=true"
+          - "{{ final_template_config.stdout }}"
