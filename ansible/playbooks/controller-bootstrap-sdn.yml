@@ -71,49 +71,28 @@
         label: "{{ item.item.name }}"
       when: item.rc != 0
 
-    - name: Check whether subnet exists
-      ansible.builtin.shell: |
-        pvesh get /cluster/sdn/subnets --output-format json | python3 - <<'PY'
-        import json
-        import sys
-
-        data = json.load(sys.stdin)
-        target_vnet = "{{ item.name }}"
-        target_subnet = "{{ item.subnet }}"
-
-        for entry in data:
-            if entry.get("vnet") == target_vnet and entry.get("subnet") == target_subnet:
-                raise SystemExit(0)
-
-        raise SystemExit(1)
-        PY
-      args:
-        executable: /bin/bash
-      loop: "{{ proxmox_sdn.subnets | default([]) }}"
-      loop_control:
-        label: "{{ item.name }} {{ item.subnet }}"
-      register: subnet_checks
-      failed_when: false
-      changed_when: false
-
-    - name: Create subnets
+    - name: Ensure subnets exist
       ansible.builtin.command:
         argv:
           - pvesh
           - create
-          - "/cluster/sdn/vnets/{{ item.item.name }}/subnets"
+          - "/cluster/sdn/vnets/{{ item.name }}/subnets"
           - --subnet
-          - "{{ item.item.subnet }}"
+          - "{{ item.subnet }}"
           - --type
           - subnet
           - --gateway
-          - "{{ item.item.gateway }}"
+          - "{{ item.gateway }}"
           - --snat
-          - "{{ 1 if item.item.snat else 0 }}"
-      loop: "{{ subnet_checks.results }}"
+          - "{{ 1 if item.snat else 0 }}"
+      loop: "{{ proxmox_sdn.subnets | default([]) }}"
       loop_control:
-        label: "{{ item.item.name }} {{ item.item.subnet }}"
-      when: item.rc != 0
+        label: "{{ item.name }} {{ item.subnet }}"
+      register: subnet_create_results
+      failed_when:
+        - subnet_create_results.rc != 0
+        - "'already defined' not in (subnet_create_results.stderr | default(''))"
+      changed_when: subnet_create_results.rc == 0
 
     - name: Apply SDN configuration
       ansible.builtin.command:
