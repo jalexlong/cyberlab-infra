@@ -71,7 +71,7 @@
         label: "{{ item.item.name }}"
       when: item.rc != 0
 
-          - name: Check whether subnet exists
+    - name: Check whether subnet exists
       ansible.builtin.shell: >
         pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json |
         python3 - <<'PY'
