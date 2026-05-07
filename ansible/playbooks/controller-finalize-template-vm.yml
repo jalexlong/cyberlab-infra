@@ -10,7 +10,7 @@
     template_name: "{{ template_name | default('tpl-debian13-base') }}"
     finalize_ssh_private_key: /root/.ssh/id_ed25519_controller
     finalize_ssh_user: cyberlab
-    finalize_probe_subnet: 10.64.62
+    finalize_probe_subnet: 10.30.0
 
   tasks:
     - name: Select template definition
