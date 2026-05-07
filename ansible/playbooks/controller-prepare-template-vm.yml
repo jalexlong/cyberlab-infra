@@ -64,6 +64,12 @@
         path: "{{ image_cache_dir }}/{{ template_def.image_filename }}"
       register: cached_image_stat
 
+    - name: Show cached image status
+      ansible.builtin.debug:
+        msg:
+          - "image_path={{ iamge_cache_dir }}/{{ template_def.image_filename }}"
+          - "cached={{ cached_image_stat.stst.exists }}"
+
     - name: Download cloud image if missing
       ansible.builtin.get_url:
         url: "{{ template_def.image_url }}"
