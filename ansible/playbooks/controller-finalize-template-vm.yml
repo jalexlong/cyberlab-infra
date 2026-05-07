@@ -84,7 +84,7 @@
       ansible.builtin.pause:
         seconds: 45
 
-    - name: Probe management subnet for SSH access
+    - name: Probe provisioning subnet for SSH access
       ansible.builtin.shell: |
         set -euo pipefail
         for host in $(seq 2 254); do
