@@ -71,6 +71,44 @@
         label: "{{ item.item.name }}"
       when: item.rc != 0
 
+          - name: Check whether subnet exists
+      ansible.builtin.shell: >
+        pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json |
+        python3 - <<'PY'
+        import json, sys
+        data = json.load(sys.stdin)
+        target = "{{ item.subnet }}"
+        for entry in data:
+            if entry.get("subnet") == target:
+                raise SystemExit(0)
+        raise SystemExit(1)
+        PY
+      args:
+        executable: /bin/bash
+      loop: "{{ proxmox_sdn.subnets | default([]) }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.subnet }}"
+      register: subnet_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Create subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - create
+          - "/cluster/sdn/vnets/{{ item.item.name }}/subnets"
+          - --subnet
+          - "{{ item.item.subnet }}"
+          - --gateway
+          - "{{ item.item.gateway }}"
+          - --snat
+          - "{{ 1 if item.item.snat else 0 }}"
+      loop: "{{ subnet_checks.results }}"
+      loop_control:
+        label: "{{ item.item.name }} {{ item.item.subnet }}"
+      when: item.rc != 0
+
     - name: Apply SDN configuration
       ansible.builtin.command:
         argv:
