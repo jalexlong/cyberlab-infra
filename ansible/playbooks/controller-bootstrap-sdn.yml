@@ -11,48 +11,15 @@
     zone_mtu: "{{ proxmox_sdn.zone.mtu }}"
 
   tasks:
-    - name: Check whether subnet exists
-      ansible.builtin.shell: |
-        pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json | python3 - <<'PY'
-        import json
-        import sys
-
-        data = json.load(sys.stdin)
-        target = "{{ item.subnet }}"
-
-        for entry in data:
-            if entry.get("subnet") == target:
-                raise SystemExit(0)
-
-        raise SystemExit(1)
-        PY
-      args:
-        executable: /bin/bash
-      loop: "{{ proxmox_sdn.subnets | default([]) }}"
-      loop_control:
-        label: "{{ item.name }} {{ item.subnet }}"
-      register: subnet_checks
-      failed_when: false
-      changed_when: false
-
-    - name: Create subnets
+    - name: Check whether SDN zone exists
       ansible.builtin.command:
         argv:
           - pvesh
-          - create
-          - "/cluster/sdn/vnets/{{ item.item.name }}/subnets"
-          - --subnet
-          - "{{ item.item.subnet }}"
-          - --type
-          - subnet
-          - --gateway
-          - "{{ item.item.gateway }}"
-          - --snat
-          - "{{ 1 if item.item.snat else 0 }}"
-      loop: "{{ subnet_checks.results }}"
-      loop_control:
-        label: "{{ item.item.name }} {{ item.item.subnet }}"
-      when: item.rc != 0
+          - get
+          - "/cluster/sdn/zones/{{ zone_name }}"
+      register: sdn_zone_check
+      failed_when: false
+      changed_when: false
 
     - name: Create SDN zone
       ansible.builtin.command:
@@ -105,15 +72,18 @@
       when: item.rc != 0
 
     - name: Check whether subnet exists
-      ansible.builtin.shell: >
-        pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json |
-        python3 - <<'PY'
-        import json, sys
+      ansible.builtin.shell: |
+        pvesh get /cluster/sdn/vnets/{{ item.name }}/subnets --output-format json | python3 - <<'PY'
+        import json
+        import sys
+
         data = json.load(sys.stdin)
         target = "{{ item.subnet }}"
+
         for entry in data:
             if entry.get("subnet") == target:
                 raise SystemExit(0)
+
         raise SystemExit(1)
         PY
       args:
@@ -133,6 +103,8 @@
           - "/cluster/sdn/vnets/{{ item.item.name }}/subnets"
           - --subnet
           - "{{ item.item.subnet }}"
+          - --type
+          - subnet
           - --gateway
           - "{{ item.item.gateway }}"
           - --snat
@@ -181,8 +153,21 @@
       register: vnets_out
       changed_when: false
 
+    - name: Show resulting SDN subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - /cluster/sdn/vnets/prov0/subnets
+          - --output-format
+          - yaml
+      register: subnets_out
+      changed_when: false
+      failed_when: false
+
     - name: Print SDN summary
       ansible.builtin.debug:
         msg:
           - "{{ zones_out.stdout }}"
           - "{{ vnets_out.stdout }}"
+          - "{{ subnets_out.stdout | default('') }}"
