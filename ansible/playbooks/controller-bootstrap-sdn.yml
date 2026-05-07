@@ -85,6 +85,8 @@
           - "{{ item.gateway }}"
           - --snat
           - "{{ 1 if item.snat else 0 }}"
+          - --dhcp-range
+          - "start-address={{ item.dhcp_start }},end-address={{ item.dhcp_end }}"
       loop: "{{ proxmox_sdn.subnets | default([]) }}"
       loop_control:
         label: "{{ item.name }} {{ item.subnet }}"
