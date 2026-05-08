@@ -59,20 +59,43 @@
           - template_def.vmid | int <= 949
         fail_msg: "Template VMID {{ template_def.vmid }} must be in the 900-949 range."
 
-    - name: Assert VM is stopped before promotion
-      ansible.builtin.command:
-        argv:
-          - qm
-          - status
-          - "{{ template_def.vmid | string }}"
+    - name: Check VM status before promotion
+      ansible.builtin.command: "qm status {{ template_def.vmid }}"
       register: qm_status_result
+      changed_when: false
+
+    - name: Request graceful shutdown before promotion when VM is running
+      ansible.builtin.command: "qm shutdown {{ template_def.vmid }} --timeout 120"
+      register: qm_shutdown_result
+      changed_when: true
+      failed_when: false
+      when:
+        - "'status: running' in qm_status_result.stdout"
+
+    - name: Wait for VM to stop before promotion
+      ansible.builtin.command: "qm status {{ template_def.vmid }}"
+      register: qm_status_wait_result
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: "'status: stopped' in qm_status_wait_result.stdout"
+      when:
+        - "'status: running' in qm_status_result.stdout"
+
+    - name: Refresh VM status before promotion
+      ansible.builtin.command: "qm status {{ template_def.vmid }}"
+      register: qm_status_final_result
       changed_when: false
 
     - name: Fail if VM is not stopped
       ansible.builtin.assert:
         that:
-          - "'status: stopped' in qm_status_result.stdout"
-        fail_msg: "VM {{ template_def.vmid }} must be stopped before promotion."
+          - "'status: stopped' in qm_status_final_result.stdout"
+        fail_msg: >-
+          VM {{ template_def.vmid }} must be stopped before promotion.
+          Current status: {{ qm_status_final_result.stdout }}.
+          The promote stage attempted graceful shutdown if the VM was running,
+          but it did not reach stopped state.
 
     - name: Check whether VM is already a template
       ansible.builtin.shell: >
