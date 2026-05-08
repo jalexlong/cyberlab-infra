@@ -165,14 +165,20 @@
       changed_when: guest_finalize_result.rc == 0
 
     - name: Shut down guest
-      ansible.builtin.shell: >
-        ssh -i {{ finalize_ssh_private_key }}
-        -o StrictHostKeyChecking=no
-        -o UserKnownHostsFile=/dev/null
-        {{ finalize_ssh_user }}@{{ template_guest_ip }}
-        'sudo shutdown -h now'
-      args:
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ finalize_ssh_private_key }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - "{{ finalize_ssh_user }}@{{ template_guest_ip }}"
+          - sudo
+          - shutdown
+          - -h
+          - now
       failed_when: false
       changed_when: true
 
