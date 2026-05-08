@@ -6,16 +6,44 @@
   vars_files:
     - ../vars/templates.yml
 
-  vars:
-    selected_template_name: "{{ template_name | default('tpl-debian13-base') }}"
-
   tasks:
+    - name: Resolve selected template name
+      ansible.builtin.set_fact:
+        selected_template_name: "{{ template_name | default('debian13') }}"
+
+    - name: Find matching template definitions
+      ansible.builtin.set_fact:
+        template_matches: >-
+          {{
+            templates
+            | selectattr('name', 'equalto', selected_template_name)
+            | list
+            +
+            (
+              templates
+              | selectattr('id', 'defined')
+              | selectattr('id', 'equalto', selected_template_name)
+              | list
+            )
+          }}
+
+    - name: Require exactly one matching template definition
+      ansible.builtin.assert:
+        that:
+          - template_matches | length == 1
+        fail_msg: >-
+          Expected exactly one template matching '{{ selected_template_name }}'
+          by id or name, but found {{ template_matches | length }}.
+          Available templates:
+          {{
+            templates
+            | map(attribute='name')
+            | list
+          }}
+
     - name: Select template definition
       ansible.builtin.set_fact:
-        template_def: >-
-          {{
-            (template_catalog | selectattr('name', 'equalto', selected_template_name) | list | first)
-          }}
+        template_def: "{{ template_matches[0] }}"
 
     - name: Assert template definition exists
       ansible.builtin.assert:

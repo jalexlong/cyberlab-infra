@@ -7,18 +7,48 @@
     - ../vars/templates.yml
 
   vars:
-    selected_template_name: "{{ template_name | default('tpl-debian13-base') }}"
     finalize_ssh_private_key: /root/.ssh/id_ed25519_controller
     finalize_ssh_user: cyberlab
     finalize_probe_subnet: 10.30.0
 
   tasks:
+    - name: Resolve selected template name
+      ansible.builtin.set_fact:
+        selected_template_name: "{{ template_name | default('debian13') }}"
+
+    - name: Find matching template definitions
+      ansible.builtin.set_fact:
+        template_matches: >-
+          {{
+            templates
+            | selectattr('name', 'equalto', selected_template_name)
+            | list
+            +
+            (
+              templates
+              | selectattr('id', 'defined')
+              | selectattr('id', 'equalto', selected_template_name)
+              | list
+            )
+          }}
+
+    - name: Require exactly one matching template definition
+      ansible.builtin.assert:
+        that:
+          - template_matches | length == 1
+        fail_msg: >-
+          Expected exactly one template matching '{{ selected_template_name }}'
+          by id or name, but found {{ template_matches | length }}.
+          Available templates:
+          {{
+            templates
+            | map(attribute='name')
+            | list
+          }}
+
     - name: Select template definition
       ansible.builtin.set_fact:
-        template_def: >-
-          {{
-            (template_catalog | selectattr('name', 'equalto', selected_template_name) | list | first)
-          }}
+        template_def: "{{ template_matches[0] }}"
 
     - name: Assert template definition exists
       ansible.builtin.assert:
@@ -96,32 +126,39 @@
         timeout: 120
 
     - name: Finalize guest over SSH
-      ansible.builtin.shell: >
-        ssh -i {{ finalize_ssh_private_key }}
-        -o StrictHostKeyChecking=no
-        -o UserKnownHostsFile=/dev/null
-        {{ finalize_ssh_user }}@{{ template_guest_ip }}
-        'sudo bash -lc "
+      ansible.builtin.shell: |
+        ssh -i {{ finalize_ssh_private_key }} \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          {{ finalize_ssh_user }}@{{ template_guest_ip }} \
+          'sudo bash -s' <<'EOF'
+        set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
+
         apt-get update
         apt-get install -y qemu-guest-agent cloud-init sudo curl
+
         systemctl enable qemu-guest-agent || true
         systemctl enable cloud-init || true
         systemctl enable cloud-init-local || true
         systemctl enable cloud-config || true
         systemctl enable cloud-final || true
+
         cloud-init clean --logs || true
+
         truncate -s 0 /etc/machine-id
         rm -f /var/lib/dbus/machine-id
         rm -f /etc/ssh/ssh_host_*
+
         apt-get clean
         rm -rf /var/lib/apt/lists/*
         rm -rf /tmp/*
         rm -rf /var/tmp/*
         rm -f /root/.bash_history
         rm -f /home/{{ finalize_ssh_user }}/.bash_history
+
         sync
-        "'
+        EOF
       args:
         executable: /bin/bash
       register: guest_finalize_result
@@ -150,6 +187,16 @@
       delay: 10
       until: "'status: stopped' in qm_stopped_wait.stdout"
       changed_when: false
+
+    - name: Restore clone-default cloud-init network config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --ipconfig0
+          - "{{ template_def.ipconfig0 }}"
+      changed_when: true
 
     - name: Print finalize summary
       ansible.builtin.debug:
