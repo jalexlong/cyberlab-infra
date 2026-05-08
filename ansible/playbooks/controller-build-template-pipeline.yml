@@ -1,31 +1,60 @@
 ---
 # Orchestrate the staged Cyberlab template build pipeline.
 #
-# This wrapper intentionally keeps the real work inside the stage playbooks:
-#   1. controller-prepare-template-vm.yml
-#   2. controller-finalize-template-vm.yml
-#   3. controller-promote-template.yml
-#
-# Usage from controller CT 800:
+# Usage from controller CT 800 or Proxmox host:
 #   cd /root/cyberlab-infra/ansible
 #   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13
-#
-# Useful stage-only runs:
-#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags prepare
-#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags finalize
-#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags promote
 
 - name: Validate template build pipeline request
   hosts: proxmox_hosts
   gather_facts: false
 
-  vars_files:
-    - ../vars/templates.yml
+  vars:
+    templates_vars_file: "{{ playbook_dir }}/../vars/templates.yml"
 
   tasks:
     - name: Resolve selected template name
       ansible.builtin.set_fact:
         selected_template_name: "{{ template_name | default('debian13') }}"
+      tags:
+        - always
+
+    - name: Check template catalog vars file exists
+      ansible.builtin.stat:
+        path: "{{ templates_vars_file }}"
+      register: templates_vars_file_stat
+      tags:
+        - always
+
+    - name: Require template catalog vars file
+      ansible.builtin.assert:
+        that:
+          - templates_vars_file_stat.stat.exists
+          - templates_vars_file_stat.stat.size | int > 0
+        fail_msg: >-
+          Could not find template catalog vars file at {{ templates_vars_file }}.
+          Expected ansible/vars/templates.yml relative to this playbook.
+      tags:
+        - always
+
+    - name: Load template catalog vars
+      ansible.builtin.include_vars:
+        file: "{{ templates_vars_file }}"
+      tags:
+        - always
+
+    - name: Require template catalog variable
+      ansible.builtin.assert:
+        that:
+          - templates is defined
+          - templates | length > 0
+        fail_msg: >-
+          Template catalog file {{ templates_vars_file }} loaded, but variable
+          'templates' is not defined or is empty. The file should contain:
+            templates:
+              - id: debian13
+                name: tpl-debian13-base
+                ...
       tags:
         - always
 
