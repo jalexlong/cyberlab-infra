@@ -1,4 +1,4 @@
-template_catalog:
+templates:
   - id: debian13
     name: tpl-debian13-base
     vmid: 900
