@@ -31,6 +31,7 @@ CONTROLLER_CTID="${CYBERLAB_CONTROLLER_CTID:-${CONTROLLER_CTID_DEFAULT}}"
 SKIP_REPO_UPDATE="${CYBERLAB_SKIP_REPO_UPDATE:-0}"
 SKIP_HOST_PREREQS="${CYBERLAB_SKIP_HOST_PREREQS:-0}"
 SKIP_NETWORK_DETECT="${CYBERLAB_SKIP_NETWORK_DETECT:-0}"
+ROTATE_API_TOKEN="${CYBERLAB_ROTATE_API_TOKEN:-0}"
 SKIP_CONTROLLER_VALIDATE="${CYBERLAB_SKIP_CONTROLLER_VALIDATE:-0}"
 SKIP_SDN_BOOTSTRAP="${CYBERLAB_SKIP_SDN_BOOTSTRAP:-0}"
 QUIET="${CYBERLAB_QUIET:-0}"
@@ -51,6 +52,7 @@ Options:
   --skip-network-detect       Do not run scripts/detect-controller-network.sh
   --skip-controller-validate  Do not run controller API validation playbook
   --skip-sdn-bootstrap        Do not run controller SDN bootstrap playbook
+  --rotate-api-token          Force recreation of the Proxmox API token and rewrite controller secret
   -q, --quiet                 Reduce status output
   -h, --help                  Show this help
 
@@ -152,6 +154,10 @@ parse_args() {
         SKIP_SDN_BOOTSTRAP=1
         shift
         ;;
+      --rotate-api-token)
+	ROTATE_API_TOKEN=1
+	shift
+	;;
       -q|--quiet)
         QUIET=1
         shift
@@ -270,9 +276,16 @@ run_host_bootstrap() {
   log "Running host bootstrap playbook"
   ansible_env_exports
 
+  local -a extra_args=()
+
+  if [[ "#{ROTATE_API_TOKEN}" == "1" ]]; then
+	  log "API token rotation requested"
+	  extra_args+=("-e" "cyberlab_rotate_api_token=true")
+  fi
+
   (
     cd -- "${REPO_DIR}/${ANSIBLE_DIR_REL}"
-    ansible-playbook -i "${INVENTORY_FILE}" "${HOST_BOOTSTRAP_PLAYBOOK}"
+    ansible-playbook -i "${INVENTORY_FILE}" "${HOST_BOOTSTRAP_PLAYBOOK}" "${extra_args[@]}"
   )
 }
 
@@ -315,6 +328,7 @@ show_runtime_summary() {
   log "  repo_branch=${REPO_BRANCH}"
   log "  controller_ctid=${CONTROLLER_CTID}"
   log "  network_vars=${REPO_DIR}/${CONTROLLER_NETWORK_VARS_REL}"
+  log "  rotate_api_token=${ROTATE_API_TOKEN}"
 }
 
 show_success_summary() {

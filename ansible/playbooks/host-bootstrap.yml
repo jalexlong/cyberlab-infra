@@ -20,6 +20,7 @@
     controller_network_generated_vars_file: "{{ repo_root }}/private/generated/controller-network.yml"
     cyberlab_repo_url: "https://github.com/jalexlong/cyberlab-infra.git"
     cyberlab_repo_branch: "main"
+    cyberlab_rotate_api_token: false
 
   pre_tasks:
     - name: Load bootstrap policy
@@ -196,9 +197,16 @@
       ansible.builtin.set_fact:
         automation_token_rotate_required: >-
           {{
-            (bootstrap_policy.bootstrap.proxmox.rotate_token_if_secret_missing | default(true)) and
             automation_token_exists and
-            (not controller_api_secret_exists)
+            (
+              (cyberlab_rotate_api_token | default(false) | bool)
+              or
+              (
+                (bootstrap_policy.bootstrap.proxmox.rotate_token_if_secret_missing | default(true) | bool)
+                and
+                (not controller_api_secret_exists)
+              )
+            )
           }}
 
     - name: Decide whether automation token must be created
@@ -211,6 +219,7 @@
     - name: Explain token reconciliation decision
       ansible.builtin.debug:
         msg:
+          - "cyberlab_rotate_api_token={{ cyberlab_rotate_api_token | default(false) | bool }}"
           - "automation_token_exists={{ automation_token_exists }}"
           - "controller_api_secret_exists={{ controller_api_secret_exists }}"
           - "automation_token_rotate_required={{ automation_token_rotate_required }}"
@@ -221,8 +230,11 @@
         pveum user token remove
         {{ bootstrap_policy.bootstrap.proxmox.automation_user }}
         {{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}
-      when: automation_token_rotate_required
+      when:
+        - automation_token_rotate_required | bool
       register: automation_token_remove
+      changed_when: automation_token_remove.rc == 0
+      failed_when: false
       become: true
 
     - name: Create automation API token
@@ -232,7 +244,8 @@
         {{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}
         --privsep 0
       register: automation_token_create
-      when: automation_token_create_required
+      when:
+        - automation_token_create_required | bool
       become: true
 
     - name: Show automation token reconciliation output
@@ -244,9 +257,17 @@
             else ['Token already existed and controller secret file was present; no token change made.']
           }}
 
-    - name: Extract created automation token secret
-      ansible.builtin.set_fact:
-        automation_token_secret: "{{ (automation_token_create.stdout | default('') | regex_search('([0-9a-fA-F-]{36})')) or '' }}"
+    - name: Require created automation token secret when token was created
+      ansible.builtin.assert:
+        that:
+          - automation_token_secret | length > 0
+        fail_msg: >-
+          Automation API token was created or rotated, but the token secret could
+          not be extracted from pveum output. Proxmox only exposes API token
+          secrets at creation time, so the controller secret file cannot be
+          repaired without this value.
+      when:
+        - automation_token_create_required | bool
 
     - name: Check whether controller LXC already exists
       command: "pct config {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
@@ -579,9 +600,9 @@
         content: |
           PROXMOX_API_URL={{ proxmox_api_url }}
           PROXMOX_API_TOKEN_ID={{ proxmox_api_token_id_full }}
-          PROXMOX_API_TOKEN_SECRET={{ automation_token_create.stdout | default('') | regex_search('([0-9a-fA-F-]{36})') | default('') }}
+          PROXMOX_API_TOKEN_SECRET={{ automation_token_secret }}
       when:
-        - (automation_token_secret | default(''))| length > 0
+        - (automation_token_secret | default('')) | length > 0
       become: true
 
     - name: Push Proxmox API env file into controller when token was created or rotated
@@ -654,9 +675,9 @@
           - "Proxmox API token id: {{ proxmox_api_token_id_full }}"
           - "Token existed before run: {{ automation_token_exists }}"
           - "Secret file existed before run: {{ controller_api_secret_exists }}"
+          - "Token rotation requested: {{ cyberlab_rotate_api_token | default(false) | bool }}"
           - "Token rotated this run: {{ automation_token_rotate_required }}"
           - "Token created this run: {{ automation_token_create_required }}"
-
 
     - name: Show controller status
       command: "pct status {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
