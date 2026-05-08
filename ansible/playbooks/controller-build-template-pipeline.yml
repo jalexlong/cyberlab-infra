@@ -1,0 +1,136 @@
+---
+# Orchestrate the staged Cyberlab template build pipeline.
+#
+# This wrapper intentionally keeps the real work inside the stage playbooks:
+#   1. controller-prepare-template-vm.yml
+#   2. controller-finalize-template-vm.yml
+#   3. controller-promote-template.yml
+#
+# Usage from controller CT 800:
+#   cd /root/cyberlab-infra/ansible
+#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13
+#
+# Useful stage-only runs:
+#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags prepare
+#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags finalize
+#   ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.yml -e template_name=debian13 --tags promote
+
+- name: Validate template build pipeline request
+  hosts: proxmox_hosts
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  tasks:
+    - name: Resolve selected template name
+      ansible.builtin.set_fact:
+        selected_template_name: "{{ template_name | default('debian13') }}"
+      tags:
+        - always
+
+    - name: Find matching template definitions by id
+      ansible.builtin.set_fact:
+        template_matches_by_id: >-
+          {{
+            templates
+            | selectattr('id', 'defined')
+            | selectattr('id', 'equalto', selected_template_name)
+            | list
+          }}
+      tags:
+        - always
+
+    - name: Find matching template definitions by name
+      ansible.builtin.set_fact:
+        template_matches_by_name: >-
+          {{
+            templates
+            | selectattr('name', 'equalto', selected_template_name)
+            | list
+          }}
+      tags:
+        - always
+
+    - name: Prefer id match over name match
+      ansible.builtin.set_fact:
+        template_matches: >-
+          {{
+            template_matches_by_id
+            if (template_matches_by_id | length > 0)
+            else template_matches_by_name
+          }}
+      tags:
+        - always
+
+    - name: Require exactly one matching template definition
+      ansible.builtin.assert:
+        that:
+          - template_matches | length == 1
+        fail_msg: >-
+          Expected exactly one template matching '{{ selected_template_name }}'
+          by id or name, but found {{ template_matches | length }}.
+          Available template ids/names:
+          {{
+            templates
+            | map(attribute='id', default='no-id')
+            | zip(templates | map(attribute='name'))
+            | map('join', ' -> ')
+            | list
+          }}
+      tags:
+        - always
+
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: "{{ template_matches[0] }}"
+      tags:
+        - always
+
+    - name: Require template is enabled
+      ansible.builtin.assert:
+        that:
+          - template_def.enabled | default(false) | bool
+        fail_msg: >-
+          Template '{{ selected_template_name }}' resolved to '{{ template_def.name }}',
+          but it is not enabled in ansible/vars/templates.yml.
+      tags:
+        - always
+
+    - name: Show template build pipeline plan
+      ansible.builtin.debug:
+        msg:
+          - "Template pipeline target: {{ template_def.id | default(template_def.name) }}"
+          - "Template name: {{ template_def.name }}"
+          - "Template VMID: {{ template_def.vmid }}"
+          - "Test clone VMID: {{ template_def.test_clone_vmid | default('not configured') }}"
+          - "Build method: {{ template_def.build_method }}"
+          - "Bridge: {{ template_def.bridge }}"
+          - "Bootstrap IP: {{ template_def.bootstrap_ip | default('not configured') }}"
+          - "Bootstrap ipconfig0: {{ template_def.bootstrap_ipconfig0 | default('not configured') }}"
+          - "Clone-default ipconfig0: {{ template_def.ipconfig0 | default('not configured') }}"
+          - "Pipeline stages: prepare -> finalize -> promote"
+      tags:
+        - always
+
+- import_playbook: controller-prepare-template-vm.yml
+  vars:
+    template_name: "{{ template_name | default('debian13') }}"
+  tags:
+    - pipeline
+    - prepare
+
+- import_playbook: controller-finalize-template-vm.yml
+  vars:
+    template_name: "{{ template_name | default('debian13') }}"
+  tags:
+    - pipeline
+    - finalize
+
+- import_playbook: controller-promote-template.yml
+  vars:
+    template_name: "{{ template_name | default('debian13') }}"
+  tags:
+    - pipeline
+    - promote
+
