@@ -17,6 +17,7 @@
 
     repo_root: "{{ playbook_dir }}/../.."
     bootstrap_policy_file: "{{ repo_root }}/data/bootstrap-policy.yml"
+    controller_network_generated_vars_file: "{{ repo_root }}/private/generated/controller-network.yml"
     cyberlab_repo_url: "https://github.com/jalexlong/cyberlab-infra.git"
     cyberlab_repo_branch: "main"
 
@@ -34,6 +35,102 @@
           - bootstrap_policy.bootstrap.controller_lxc is defined
           - bootstrap_policy.bootstrap.tooling is defined
         fail_msg: "bootstrap-policy.yml is missing required keys."
+
+    - name: Check generated controller network vars
+      ansible.builtin.stat:
+        path: "{{ controller_network_generated_vars_file }}"
+      register: controller_network_generated_vars_stat
+
+    - name: Require generated controller network vars
+      ansible.builtin.assert:
+        that:
+          - controller_network_generated_vars_stat.stat.exists
+          - controller_network_generated_vars_stat.stat.size | int > 0
+        fail_msg: >-
+          Missing generated controller network vars at
+          {{ controller_network_generated_vars_file }}.
+          Run scripts/detect-controller-network.sh before host-bootstrap.yml.
+
+    - name: Load generated controller network vars
+      ansible.builtin.include_vars:
+        file: "{{ controller_network_generated_vars_file }}"
+
+    - name: Assert generated controller network vars loaded
+      ansible.builtin.assert:
+        that:
+          - cyberlab_detected_network is defined
+          - cyberlab_detected_network.management_bridge is defined
+          - cyberlab_detected_network.controller_ip is defined
+          - cyberlab_detected_network.controller_nameservers is defined
+        fail_msg: >-
+          Generated controller network vars are malformed.
+          Expected cyberlab_detected_network.management_bridge,
+          controller_ip, and controller_nameservers.
+
+    - name: Resolve controller management network settings
+      ansible.builtin.set_fact:
+        controller_management_bridge: >-
+          {{
+            (cyberlab_network | default({})).management_bridge
+            | default(cyberlab_detected_network.management_bridge, true)
+          }}
+        controller_net_vlan_resolved: >-
+          {{
+            (cyberlab_network | default({})).controller_net_vlan
+            | default(cyberlab_detected_network.controller_net_vlan | default(none), true)
+          }}
+        controller_ip_config: >-
+          {{
+            (cyberlab_network | default({})).controller_ip
+            | default(cyberlab_detected_network.controller_ip | default('dhcp'), true)
+          }}
+        controller_nameservers_resolved: >-
+          {{
+            (cyberlab_network | default({})).controller_nameservers
+            | default(cyberlab_detected_network.controller_nameservers | default([]), true)
+          }}
+
+    - name: Require at least one controller DNS server
+      ansible.builtin.assert:
+        that:
+          - controller_nameservers_resolved | length > 0
+        fail_msg: >-
+          No usable controller DNS servers were resolved. The controller CT needs
+          site-valid DNS before package installation. Check host /etc/resolv.conf
+          or set cyberlab_network.controller_nameservers.
+
+    - name: Build controller CT net0 parts
+      ansible.builtin.set_fact:
+        controller_net0_parts: >-
+          {{
+            ['name=eth0', 'bridge=' ~ controller_management_bridge]
+            +
+            (
+              ['tag=' ~ (controller_net_vlan_resolved | string)]
+              if (
+                controller_net_vlan_resolved is not none
+                and (controller_net_vlan_resolved | string | length) > 0
+                and (controller_net_vlan_resolved | string) not in ['none', 'null', 'untagged']
+              )
+              else []
+            )
+            +
+            ['ip=' ~ controller_ip_config]
+          }}
+
+    - name: Build controller CT network and DNS strings
+      ansible.builtin.set_fact:
+        controller_net0: "{{ controller_net0_parts | join(',') }}"
+        controller_nameservers_arg: "{{ controller_nameservers_resolved | join(' ') }}"
+
+    - name: Show resolved controller network configuration
+      ansible.builtin.debug:
+        msg:
+          bridge: "{{ controller_management_bridge }}"
+          vlan: "{{ controller_net_vlan_resolved | default('untagged') }}"
+          ip: "{{ controller_ip_config }}"
+          dns: "{{ controller_nameservers_resolved }}"
+          net0: "{{ controller_net0 }}"
 
   tasks:
     - name: Ensure required host packages are installed
@@ -199,11 +296,45 @@
         --cores {{ bootstrap_policy.bootstrap.controller_lxc.cores }}
         --memory {{ bootstrap_policy.bootstrap.controller_lxc.memory_mb }}
         --rootfs local-lvm:{{ bootstrap_policy.bootstrap.controller_lxc.disk_gb }}
-        --net0 name=eth0,bridge={{ bootstrap_policy.bootstrap.controller_lxc.bridge }},ip=dhcp
+        --net0 {{ controller_net0 | quote }}
+        --nameserver {{ controller_nameservers_arg | quote }}
         --unprivileged {{ 1 if bootstrap_policy.bootstrap.controller_lxc.unprivileged else 0 }}
         --onboot {{ 1 if bootstrap_policy.bootstrap.controller_lxc.start_on_boot else 0 }}
       become: true
       when: controller_ct_check.rc != 0
+
+    - name: Check controller LXC status before network reconciliation
+      ansible.builtin.command: "pct status {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_status_before_network_reconcile
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Stop controller LXC before network reconciliation when already running
+      ansible.builtin.command: "pct stop {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_stop_for_network_reconcile
+      changed_when: controller_stop_for_network_reconcile.rc == 0
+      failed_when: false
+      become: true
+      when:
+        - controller_status_before_network_reconcile.rc == 0
+        - "'status: running' in controller_status_before_network_reconcile.stdout"
+
+    - name: Reconcile controller LXC network
+      ansible.builtin.command: >
+        pct set {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+        --net0 {{ controller_net0 | quote }}
+      register: controller_network_reconcile
+      changed_when: true
+      become: true
+
+    - name: Reconcile controller LXC DNS
+      ansible.builtin.command: >
+        pct set {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+        --nameserver {{ controller_nameservers_arg | quote }}
+      register: controller_dns_reconcile
+      changed_when: true
+      become: true
 
     - name: Start automation controller LXC
       command: "pct start {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
@@ -215,6 +346,102 @@
     - name: Wait briefly after starting controller
       pause:
         seconds: 10
+
+    - name: Validate controller CT network before package install
+      block:
+        - name: Wait for controller CT to have an IPv4 address
+          ansible.builtin.command: >
+            pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+            -- sh -c "ip -4 addr show scope global | grep -q 'inet '"
+          register: controller_ipv4_check
+          retries: 20
+          delay: 3
+          until: controller_ipv4_check.rc == 0
+          changed_when: false
+          become: true
+
+        - name: Verify controller CT has a default IPv4 route
+          ansible.builtin.command: >
+            pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+            -- ip -4 route show default
+          register: controller_default_route_check
+          retries: 10
+          delay: 3
+          until:
+            - controller_default_route_check.rc == 0
+            - controller_default_route_check.stdout | length > 0
+          changed_when: false
+          become: true
+
+        - name: Verify controller CT can resolve Debian mirror over IPv4
+          ansible.builtin.command: >
+            pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+            -- getent ahostsv4 deb.debian.org
+          register: controller_dns_check
+          retries: 5
+          delay: 3
+          until: controller_dns_check.rc == 0
+          changed_when: false
+          become: true
+
+        - name: Verify controller CT can reach apt repositories
+          ansible.builtin.command: >
+            pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+            -- apt-get
+            -o Acquire::Retries=0
+            -o Acquire::http::Timeout=8
+            -o Acquire::https::Timeout=8
+            update
+          register: controller_apt_update_check
+          changed_when: false
+          become: true
+
+      rescue:
+        - name: Gather controller CT network diagnostics
+          ansible.builtin.command: >
+            pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
+            -- sh -c '
+              echo "### ip -4 addr";
+              ip -4 addr;
+              echo;
+              echo "### ip -4 route";
+              ip -4 route;
+              echo;
+              echo "### /etc/resolv.conf";
+              cat /etc/resolv.conf;
+            '
+          register: controller_network_diagnostics
+          changed_when: false
+          failed_when: false
+          become: true
+
+        - name: Fail with actionable controller CT network diagnosis
+          ansible.builtin.fail:
+            msg: |
+              Controller CT {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} failed network preflight.
+
+              Resolved intended controller network:
+                bridge: {{ controller_management_bridge }}
+                vlan: {{ controller_net_vlan_resolved | default('untagged') }}
+                ip: {{ controller_ip_config }}
+                dns: {{ controller_nameservers_resolved | join(', ') }}
+                net0: {{ controller_net0 }}
+
+              This usually means one of the following:
+                - the Proxmox host is on a trunk port and the CT needs a VLAN tag
+                - the CT is on a network without DHCP
+                - the CT received DHCP but no default route
+                - the CT has DNS servers that are unreachable or blocked
+                - the site blocks outbound apt repository access
+
+              If this host is on a trunk port, try:
+                CYBERLAB_CONTROLLER_VLAN=<management_vlan> ./scripts/install-cyberlab.sh
+
+              If DNS was detected incorrectly, try:
+                CYBERLAB_CONTROLLER_DNS="<dns1> <dns2>" ./scripts/install-cyberlab.sh
+
+              Controller diagnostics:
+              {{ controller_network_diagnostics.stdout }}
 
     - name: Copy bootstrap-controller.sh to Proxmox host temp path
       copy:

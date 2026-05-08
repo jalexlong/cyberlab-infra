@@ -1,7 +1,6 @@
 proxmox_api_host: "10.64.62.200"
 proxmox_api_user: "ansible@pve"
 proxmox_api_token_id: "automation"
-proxmox_api_token_secret: "91598b42-07fd-4975-befb-db0ca0cb028f"
 proxmox_validate_certs: false
 
 teachers_file: "/home/jlong/cyberlab-infra/data/teachers.yml"
