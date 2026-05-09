@@ -1,14 +1,19 @@
+---
 templates:
   - id: debian13
     name: tpl-debian13-base
+    display_name: "Debian 13"
     vmid: 900
     test_clone_vmid: 950
     build_method: cloud_image
     enabled: true
+
     os_family: debian
     version: "13"
-    image_url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
-    image_filename: debian-13-genericcloud-amd64.qcow2
+
+    image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+    image_filename: "debian-13-genericcloud-amd64.qcow2"
+
     target_node: pve1
     memory: 2048
     cores: 2
@@ -19,30 +24,38 @@ templates:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
+
     bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
     agent_enabled: true
+
     ci_user: cyberlab
     ci_upgrade: true
+
     bootstrap_ip: 10.30.0.10
-    bootstrap_ipconfig0: ip=10.30.0.10/24,gw=10.30.0.1
-    ipconfig0: ip=dhcp
+    bootstrap_ipconfig0: "ip=10.30.0.10/24,gw=10.30.0.1"
+    ipconfig0: "ip=dhcp"
+
     boot: order=scsi0
     description: "Cyberlab Debian 13 base template"
     tags: "template;debian13;linux;base"
 
   - id: ubuntu2604
     name: tpl-ubuntu2604-base
+    display_name: "Ubuntu 26.04"
     vmid: 901
     test_clone_vmid: 951
     build_method: cloud_image
     enabled: false
+
     os_family: ubuntu
     version: "26.04"
+
     image_url: ""
     image_filename: ""
+
     target_node: pve1
     memory: 2048
     cores: 2
@@ -53,33 +66,41 @@ templates:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
+
     bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
     agent_enabled: true
+
     ci_user: cyberlab
     ci_upgrade: true
+
     bootstrap_ip: 10.30.0.11
-    bootstrap_ipconfig0: ip=10.30.0.11/24,gw=10.30.0.1
-    ipconfig0: ip=dhcp
+    bootstrap_ipconfig0: "ip=10.30.0.11/24,gw=10.30.0.1"
+    ipconfig0: "ip=dhcp"
+
     boot: order=scsi0
     description: "Cyberlab Ubuntu 26.04 base template"
     tags: "template;ubuntu2604;linux;base"
 
   - id: parrot
     name: tpl-parrot-base
+    display_name: "Parrot Security"
     vmid: 902
     test_clone_vmid: 952
     build_method: qcow_import
     enabled: false
+
     os_family: parrot
-    version: "current"
-    image_url: ""
-    image_filename: ""
+    version: "7.2"
+
+    image_url: "https://deb.parrot.sh/parrot/iso/7.2/Parrot-security-7.2_amd64.qcow2"
+    image_filename: "Parrot-security-7.2_amd64.qcow2"
+
     target_node: pve1
-    memory: 2048
-    cores: 2
+    memory: 4096
+    cores: 4
     sockets: 1
     cpu: x86-64-v2-AES
     machine: q35
@@ -87,58 +108,80 @@ templates:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
+
     bridge: prov0
     net_model: virtio
     serial_socket: true
     vga: serial0
     agent_enabled: true
+
     ci_user: cyberlab
     ci_upgrade: true
+
     bootstrap_ip: 10.30.0.12
-    bootstrap_ipconfig0: ip=10.30.0.12/24,gw=10.30.0.1
-    ipconfig0: ip=dhcp
+    bootstrap_ipconfig0: "ip=10.30.0.12/24,gw=10.30.0.1"
+    ipconfig0: "ip=dhcp"
+
     boot: order=scsi0
-    description: "Cyberlab Parrot base template"
+    description: "Cyberlab Parrot Security base template"
     tags: "template;parrot;linux;base"
 
-  - name: tpl-win7-base
+  - id: win7
+    name: tpl-win7-base
+    display_name: "Windows 7"
     vmid: 903
     test_clone_vmid: 953
     build_method: iso_install
     enabled: false
+
     os_family: windows
     version: "7"
-    image_url: ""
-    image_filename: ""
+
+    image_url: "https://dn710900.ca.archive.org/0/items/7601.24214.1808011700.win7sp1ldrescrowclientultimatex64freenus_202003/7601.24214.180801-1700.win7sp1_ldr_escrow_CLIENT_ULTIMATE_x64FRE_en-us.iso"
+    image_filename: "win7sp1_ultimate_x64_en-us.iso"
+
+    driver_iso_url: "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.189-1/virtio-win-0.1.189.iso"
+    driver_iso_filename: "virtio-win-0.1.189.iso"
+
     target_node: pve1
     memory: 4096
     cores: 2
     sockets: 1
     cpu: x86-64-v2-AES
-    machine: q35
+    machine: pc
     bios: seabios
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
+
     bridge: prov0
     net_model: e1000
     serial_socket: false
     vga: std
     agent_enabled: false
+
     bootstrap_ip: 10.30.0.13
-    bootstrap_ipconfig0: ip=10.30.0.13/24,gw=10.30.0.1
+    bootstrap_ipconfig0: "ip=10.30.0.13/24,gw=10.30.0.1"
+    ipconfig0: "ip=dhcp"
+
+    boot: order=scsi0
     description: "Cyberlab Windows 7 base template"
     tags: "template;win7;windows;base"
 
-  - name: tpl-metasploitable2-base
+  - id: metasploitable2
+    name: tpl-metasploitable2-base
+    display_name: "Metasploitable 2"
     vmid: 904
     test_clone_vmid: 954
     build_method: legacy_appliance
     enabled: false
+
     os_family: ubuntu
     version: "metasploitable2"
-    image_url: ""
-    image_filename: ""
+
+    image_url: "https://downloads.metasploit.com/data/metasploitable/metasploitable-linux-2.0.0.zip"
+    image_filename: "metasploitable-linux-2.0.0.zip"
+
     target_node: pve1
     memory: 1024
     cores: 1
@@ -149,12 +192,18 @@ templates:
     scsihw: virtio-scsi-single
     disk_storage: local-lvm
     cloudinit_storage: local-lvm
+
     bridge: prov0
     net_model: e1000
     serial_socket: false
     vga: std
     agent_enabled: false
+
     bootstrap_ip: 10.30.0.14
-    bootstrap_ipconfig0: ip=10.30.0.14/24,gw=10.30.0.1
+    bootstrap_ipconfig0: "ip=10.30.0.14/24,gw=10.30.0.1"
+    ipconfig0: "ip=dhcp"
+
+    boot: order=scsi0
     description: "Cyberlab Metasploitable 2 base template"
     tags: "template;metasploitable2;legacy;base"
+
