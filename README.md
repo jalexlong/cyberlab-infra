@@ -130,6 +130,8 @@ cyberlab-infra/
 │   ├── data-model.md
 │   ├── platform-pipeline.md
 │   └── template-lifecycle.md
+│   ├── recovery.md
+│   └── testing.md
 ├── data/
 │   ├── bootstrap-policy.yml
 │   ├── teachers.yml
@@ -366,14 +368,13 @@ The current working milestone proves:
 
 ## Next milestones
 
-- align policy and documentation with the staged template pipeline
-- add recovery documentation for common partial-failure states
 - add validation clone automation
 - expand template support beyond Debian 13
 - refactor OpenTofu to consume the current model
 - refactor Ansible to consume generated runtime student artifacts
 - add snapshot and rollback controls
 - validate student and teacher access flows end to end
+- test validation clone automation on live Proxmox hardware
 
 ## Notes for future me
 
