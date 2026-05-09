@@ -63,7 +63,7 @@ If Proxmox is connected to a trunk port, untagged CT traffic may land on a dead 
 
 School-lab note:
 
-Do not fall back to public DNS. Use approved school DNS servers.
+Do not fall back to public DNS. Use authorized school DNS servers.
 
 ---
 

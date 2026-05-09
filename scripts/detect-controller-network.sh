@@ -532,7 +532,7 @@ main() {
     if [[ "${ALLOW_EMPTY_DNS}" == "1" ]]; then
       warn "No usable non-loopback IPv4 DNS servers discovered. Continuing because CYBERLAB_ALLOW_EMPTY_DNS=1."
     else
-      die "No usable non-loopback IPv4 DNS servers discovered. Set CYBERLAB_CONTROLLER_DNS to the site-approved DNS server(s)."
+      die "No usable non-loopback IPv4 DNS servers discovered. Set CYBERLAB_CONTROLLER_DNS to the site-authorized DNS server(s)."
     fi
   fi
 

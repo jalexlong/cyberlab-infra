@@ -1,0 +1,344 @@
+---
+- name: Validate promoted template through scratch clone
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+
+  vars:
+    validation_recreate_existing: true
+    validation_cleanup_clone: false
+    validation_boot_wait_seconds: 20
+    validation_agent_retries: 30
+    validation_agent_delay: 5
+
+  tasks:
+    - name: Resolve selected template name
+      ansible.builtin.set_fact:
+        selected_template_name: "{{ template_name | default('debian13') }}"
+
+    - name: Find matching template definitions by id
+      ansible.builtin.set_fact:
+        template_matches_by_id: >-
+          {{
+            templates
+            | selectattr('id', 'defined')
+            | selectattr('id', 'equalto', selected_template_name)
+            | list
+          }}
+
+    - name: Find matching template definitions by name
+      ansible.builtin.set_fact:
+        template_matches_by_name: >-
+          {{
+            templates
+            | selectattr('name', 'defined')
+            | selectattr('name', 'equalto', selected_template_name)
+            | list
+          }}
+
+    - name: Prefer id match over name match
+      ansible.builtin.set_fact:
+        template_matches: >-
+          {{
+            template_matches_by_id
+            if (template_matches_by_id | length > 0)
+            else template_matches_by_name
+          }}
+
+    - name: Require exactly one matching template definition
+      ansible.builtin.assert:
+        that:
+          - template_matches | length == 1
+        fail_msg: >-
+          Expected exactly one template matching '{{ selected_template_name }}'
+          by id or name, but found {{ template_matches | length }}.
+          Available templates:
+          {{ templates | map(attribute='name') | list }}
+
+    - name: Select template definition
+      ansible.builtin.set_fact:
+        template_def: "{{ template_matches[0] }}"
+
+    - name: Require template is enabled
+      ansible.builtin.assert:
+        that:
+          - template_def.enabled | default(false) | bool
+        fail_msg: >-
+          Template '{{ selected_template_name }}' resolved to
+          '{{ template_def.name }}', but it is not enabled in
+          ansible/vars/templates.yml.
+
+    - name: Require template VMID and validation clone VMID
+      ansible.builtin.assert:
+        that:
+          - template_def.vmid is defined
+          - template_def.test_clone_vmid is defined
+          - template_def.vmid | int >= 900
+          - template_def.vmid | int <= 949
+          - template_def.test_clone_vmid | int >= 950
+          - template_def.test_clone_vmid | int <= 999
+        fail_msg: >-
+          Template '{{ template_def.name }}' must define vmid in 900-949
+          and test_clone_vmid in 950-999.
+
+    - name: Check promoted template config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ template_def.vmid | string }}"
+      register: template_config
+      changed_when: false
+
+    - name: Require source VM is a Proxmox template
+      ansible.builtin.assert:
+        that:
+          - "'template: 1' in template_config.stdout"
+        fail_msg: >-
+          VMID {{ template_def.vmid }} exists but is not marked as a Proxmox
+          template. Run controller-promote-template.yml first.
+
+    - name: Check whether validation clone already exists
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.test_clone_vmid | string }}"
+      register: validation_clone_status
+      changed_when: false
+      failed_when: false
+
+    - name: Stop existing validation clone when recreation is enabled
+      ansible.builtin.command:
+        argv:
+          - qm
+          - stop
+          - "{{ template_def.test_clone_vmid | string }}"
+      register: stop_existing_validation_clone
+      changed_when: stop_existing_validation_clone.rc == 0
+      failed_when: false
+      when:
+        - validation_clone_status.rc == 0
+        - validation_recreate_existing | bool
+
+    - name: Destroy existing validation clone when recreation is enabled
+      ansible.builtin.command:
+        argv:
+          - qm
+          - destroy
+          - "{{ template_def.test_clone_vmid | string }}"
+          - --purge
+      register: destroy_existing_validation_clone
+      changed_when: destroy_existing_validation_clone.rc == 0
+      when:
+        - validation_clone_status.rc == 0
+        - validation_recreate_existing | bool
+
+    - name: Refuse to overwrite existing validation clone when recreation is disabled
+      ansible.builtin.assert:
+        that:
+          - validation_clone_status.rc != 0
+        fail_msg: >-
+          Validation clone VMID {{ template_def.test_clone_vmid }} already
+          exists. Set validation_recreate_existing=true to destroy and recreate
+          disposable validation clones.
+      when:
+        - not (validation_recreate_existing | bool)
+
+    - name: Build validation clone name
+      ansible.builtin.set_fact:
+        validation_clone_name: >-
+          {{
+            (template_def.id | default(template_def.name))
+            | regex_replace('[^A-Za-z0-9-]', '-')
+          }}-validation
+
+    - name: Clone promoted template into validation VMID
+      ansible.builtin.command:
+        argv:
+          - qm
+          - clone
+          - "{{ template_def.vmid | string }}"
+          - "{{ template_def.test_clone_vmid | string }}"
+          - --name
+          - "{{ validation_clone_name }}"
+          - --full
+          - "1"
+      register: validation_clone_create
+      changed_when: validation_clone_create.rc == 0
+
+    - name: Ensure validation clone uses DHCP cloud-init networking when configured
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.test_clone_vmid | string }}"
+          - --ipconfig0
+          - "{{ template_def.ipconfig0 }}"
+      register: validation_clone_ipconfig
+      changed_when: validation_clone_ipconfig.rc == 0
+      when:
+        - template_def.ipconfig0 is defined
+        - template_def.ipconfig0 | length > 0
+
+    - name: Start validation clone
+      ansible.builtin.command:
+        argv:
+          - qm
+          - start
+          - "{{ template_def.test_clone_vmid | string }}"
+      register: validation_clone_start
+      changed_when: validation_clone_start.rc == 0
+
+    - name: Wait briefly for guest boot
+      ansible.builtin.pause:
+        seconds: "{{ validation_boot_wait_seconds | int }}"
+
+    - name: Check validation clone status
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ template_def.test_clone_vmid | string }}"
+      register: validation_clone_running_status
+      changed_when: false
+
+    - name: Require validation clone is running
+      ansible.builtin.assert:
+        that:
+          - "'status: running' in validation_clone_running_status.stdout"
+        fail_msg: >-
+          Validation clone {{ template_def.test_clone_vmid }} did not reach
+          running state. Current status:
+          {{ validation_clone_running_status.stdout }}
+
+    - name: Wait for QEMU guest agent when expected
+      ansible.builtin.command:
+        argv:
+          - qm
+          - agent
+          - "{{ template_def.test_clone_vmid | string }}"
+          - ping
+      register: validation_agent_ping
+      changed_when: false
+      failed_when: false
+      retries: "{{ validation_agent_retries | int }}"
+      delay: "{{ validation_agent_delay | int }}"
+      until: validation_agent_ping.rc == 0
+      when:
+        - template_def.agent_enabled | default(false) | bool
+
+    - name: Require guest agent when expected
+      ansible.builtin.assert:
+        that:
+          - validation_agent_ping.rc == 0
+        fail_msg: >-
+          Template '{{ template_def.name }}' expects the QEMU guest agent,
+          but validation clone {{ template_def.test_clone_vmid }} did not
+          respond to guest-agent ping.
+      when:
+        - template_def.agent_enabled | default(false) | bool
+
+    - name: Discover non-loopback IPv4 address through guest agent
+      ansible.builtin.shell: |
+        set -euo pipefail
+        qm agent {{ template_def.test_clone_vmid }} network-get-interfaces | python3 -c '
+        import json
+        import sys
+
+        data = json.load(sys.stdin)
+        addrs = []
+
+        for iface in data:
+            for addr in iface.get("ip-addresses", []):
+                if addr.get("ip-address-type") == "ipv4":
+                    ip = addr.get("ip-address", "")
+                    if ip and not ip.startswith("127."):
+                        addrs.append(ip)
+
+        for ip in addrs:
+            print(ip)
+
+        sys.exit(0 if addrs else 1)
+        '
+      args:
+        executable: /bin/bash
+      register: validation_ipv4_result
+      changed_when: false
+      failed_when: false
+      retries: "{{ validation_agent_retries | int }}"
+      delay: "{{ validation_agent_delay | int }}"
+      until: validation_ipv4_result.rc == 0
+      when:
+        - template_def.agent_enabled | default(false) | bool
+
+    - name: Require non-loopback IPv4 address when guest agent is expected
+      ansible.builtin.assert:
+        that:
+          - validation_ipv4_result.rc == 0
+          - validation_ipv4_result.stdout_lines | length > 0
+        fail_msg: >-
+          Validation clone {{ template_def.test_clone_vmid }} did not report
+          a non-loopback IPv4 address through the guest agent.
+      when:
+        - template_def.agent_enabled | default(false) | bool
+
+    - name: Select validation clone IPv4 address
+      ansible.builtin.set_fact:
+        validation_clone_ipv4: "{{ validation_ipv4_result.stdout_lines[0] }}"
+      when:
+        - template_def.agent_enabled | default(false) | bool
+        - validation_ipv4_result.stdout_lines | length > 0
+
+    - name: Ping validation clone IPv4 from Proxmox host
+      ansible.builtin.command:
+        argv:
+          - ping
+          - -c
+          - "2"
+          - -W
+          - "2"
+          - "{{ validation_clone_ipv4 }}"
+      register: validation_ping_result
+      changed_when: false
+      when:
+        - validation_clone_ipv4 is defined
+
+    - name: Stop validation clone when cleanup is enabled
+      ansible.builtin.command:
+        argv:
+          - qm
+          - stop
+          - "{{ template_def.test_clone_vmid | string }}"
+      register: cleanup_stop_validation_clone
+      changed_when: cleanup_stop_validation_clone.rc == 0
+      failed_when: false
+      when:
+        - validation_cleanup_clone | bool
+
+    - name: Destroy validation clone when cleanup is enabled
+      ansible.builtin.command:
+        argv:
+          - qm
+          - destroy
+          - "{{ template_def.test_clone_vmid | string }}"
+          - --purge
+      register: cleanup_destroy_validation_clone
+      changed_when: cleanup_destroy_validation_clone.rc == 0
+      when:
+        - validation_cleanup_clone | bool
+
+    - name: Print validation summary
+      ansible.builtin.debug:
+        msg:
+          - "template={{ template_def.name }}"
+          - "template_vmid={{ template_def.vmid }}"
+          - "validation_clone_vmid={{ template_def.test_clone_vmid }}"
+          - "validation_clone_name={{ validation_clone_name }}"
+          - "validation_clone_running=true"
+          - "guest_agent_expected={{ template_def.agent_enabled | default(false) | bool }}"
+          - "validation_clone_ipv4={{ validation_clone_ipv4 | default('not checked') }}"
+          - "validation_cleanup_clone={{ validation_cleanup_clone | bool }}"
+          - "validation_passed=true"
