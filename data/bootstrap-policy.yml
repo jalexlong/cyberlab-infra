@@ -1,3 +1,4 @@
+---
 bootstrap:
   proxmox:
     automation_user: "cyberlab-automation@pve"
@@ -30,73 +31,68 @@ bootstrap:
 
 vmid_policy:
   reserved_ranges:
-    infra_controllers:
+    infrastructure:
       start: 800
-      end: 849
-      purpose: "Automation LXCs, controller services, and non-classroom control-plane infrastructure."
-      examples:
-        - "800 = cyberlab-ctrl"
+      end: 899
+      purpose: "Cyberlab infrastructure, control-plane services, and shared support services."
+      assignments:
+        800: "Cyberlab automation controller LXC"
+        801: "Reserved for future apt-cache or package mirror service"
       notes:
-        - "Use for systems that manage the platform rather than participate in classroom activities."
-        - "Prefer LXCs here unless a full VM is specifically required."
+        - "Infrastructure VMIDs are manually assigned and should remain stable across rebuilds."
+        - "These systems manage or support the platform and are not classroom workloads."
 
-    shared_infra:
-      start: 850
-      end: 889
-      purpose: "Shared platform support systems such as package mirrors, logging, backup helpers, monitoring, or future internal services."
-      examples: []
+    golden_templates:
+      start: 900
+      end: 949
+      purpose: "Promoted golden VM templates validated for classroom/lab cloning."
+      assignments:
+        900: "tpl-debian13-base"
+        901: "tpl-ubuntu2604-base"
+        902: "tpl-parrot-base"
+        903: "tpl-win7-base"
+        904: "tpl-metasploitable2-base"
       notes:
-        - "Reserve for Cyberlab infrastructure that is not the main automation controller."
-        - "Keeps support services separate from templates and classroom resources."
+        - "Templates in this range may be consumed by deployment automation only after validation."
+        - "Template metadata lives in ansible/vars/templates.yml."
+        - "Each template should have a stable short id such as debian13, ubuntu2604, parrot, win7, or metasploitable2."
 
-    candidate_templates:
-      start: 8901
-      end: 8999
-      purpose: "Candidate templates awaiting validation and promotion."
-      examples:
-        - "8901 = parrot-candidate"
-        - "8902 = win7-candidate"
-        - "8903 = debian13-candidate"
-        - "8904 = metasploitable2-candidate"
+    validation_clones:
+      start: 950
+      end: 999
+      purpose: "Disposable test clones used to validate promoted templates before broader deployment."
+      assignments:
+        950: "Debian 13 validation clone"
+        951: "Ubuntu 26.04 validation clone"
+        952: "Parrot validation clone"
+        953: "Windows 7 validation clone"
+        954: "Metasploitable 2 validation clone"
       notes:
-        - "Candidates must never be consumed directly by OpenTofu lab deployment."
-        - "Every candidate must pass validation before promotion."
-
-    approved_templates:
-      start: 9001
-      end: 9099
-      purpose: "Approved templates validated for deployment."
-      examples:
-        - "9001 = parrot-template"
-        - "9002 = win7-template"
-        - "9003 = debian13-template"
-        - "9004 = metasploitable2-template"
-      notes:
-        - "Only approved templates may be referenced by environment files and deployment automation."
-        - "Promotion should be explicit and documented."
+        - "Validation clones are disposable."
+        - "They must not be treated as golden source templates."
+        - "They are used to prove boot, login, network, DHCP, and guest behavior."
 
     classroom_workloads:
       start: 100000000
       end: 999999999
       purpose: "Teacher and student lab VMs generated from the structured Cyberlab VMID scheme."
-      examples:
-        - "TTTSSS0XX = teacher VMs"
-        - "TTTSSS1XX and above = student VMs"
+      formula: "teacher_id * 1000000 + section_code * 1000 + offset"
       notes:
         - "This range is governed by the Cyberlab structured VMID format."
         - "Teacher ID, section code, and role/offset encode ownership and placement."
-        - "This range must remain disjoint from infra and template ranges."
+        - "This range must remain disjoint from infrastructure, templates, and validation clones."
 
   rules:
     - "Do not assign VMIDs ad hoc outside the reserved ranges."
-    - "Do not reuse candidate or approved template VMIDs for non-template systems."
-    - "Do not deploy classroom workloads from candidate template VMIDs."
-    - "Infra/controller VMIDs should stay stable across rebuilds where practical."
-    - "If a range must change, update bootstrap-policy.yml, template metadata, and documentation together."
+    - "Do not reuse infrastructure VMIDs for templates or classroom workloads."
+    - "Do not reuse golden template VMIDs for validation clones or non-template systems."
+    - "Validation clones are disposable and must not be treated as source templates."
+    - "Do not deploy classroom workloads from unvalidated golden templates."
+    - "Before template promotion, restore clone-default networking to DHCP where supported."
+    - "If a range changes, update bootstrap-policy.yml, ansible/vars/templates.yml, README.md, and template lifecycle documentation together."
 
   allocation_strategy:
-    infra_controllers: "Manually assigned from the infra_controllers range."
-    shared_infra: "Manually assigned from the shared_infra range."
-    candidate_templates: "Statically assigned per template definition in data/templates.yml."
-    approved_templates: "Statically assigned per template definition in data/templates.yml."
+    infrastructure: "Manually assigned from 800-899."
+    golden_templates: "Statically assigned per template definition in ansible/vars/templates.yml."
+    validation_clones: "Statically assigned per template definition as test_clone_vmid."
     classroom_workloads: "Programmatically assigned from the structured Cyberlab VMID scheme."

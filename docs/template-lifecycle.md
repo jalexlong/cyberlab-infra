@@ -1,11 +1,13 @@
 # Template Lifecycle
 
-This project uses a two-stage template model:
+This project uses a staged template model:
 
-- **candidate templates** are newly built and not yet trusted for lab deployment
-- **approved templates** are validated and safe for OpenTofu to consume
+- **prepared VM**: a buildable VM shell or imported image that is not yet trusted
+- **finalized VM**: a configured VM that has been booted, reached, and cleaned for template use
+- **golden template**: a promoted template in the `900-949` range
+- **validation clone**: a disposable test clone in the `950-999` range
 
-This prevents automation from mass-deploying broken images.
+This prevents automation from mass-deploying broken images while avoiding a separate long-lived pre-promotion VMID range.
 
 ---
 
@@ -27,114 +29,126 @@ The school-lab demonstrated the opposite pattern:
 
 The goal of this lifecycle is to combine both strengths:
 
-- **automation**
-- **stability**
+- automation
+- validation
+- stability
+- repeatability
 
 ---
 
-## States
+## Lifecycle states
 
-### Candidate
-A candidate template is an image that has been:
+### 1. Prepare template VM
 
-- downloaded or imported
-- installed if needed
-- prepared enough to boot
+Automation creates or imports a VM from the template catalog.
 
-But it has **not yet passed validation**.
+At this stage the VM is not trusted for deployment. It may use temporary bootstrap networking, temporary cloud-init settings, imported disks, installer media, or other build-only configuration.
 
-Candidate VMIDs live in the `89xx` range.
+For Debian 13, the prepare stage uses the provisioning network and static bootstrap address defined in `ansible/vars/templates.yml`.
 
-Examples:
-- `8901` parrot-candidate
-- `8902` win7-candidate
-- `8903` debian13-candidate
-- `8904` metasploitable2-candidate
+### 2. Finalize template VM
 
-### Approved
-An approved template is a candidate that has passed validation and is safe for section deployment.
+Automation boots and configures the prepared VM until it is suitable for template promotion.
 
-Approved VMIDs live in the `90xx` range.
+Finalization may include:
 
-Examples:
-- `9001` parrot-template
-- `9002` win7-template
-- `9003` debian13-template
-- `9004` metasploitable2-template
+- validating boot behavior
+- validating console or SSH access
+- validating guest networking
+- applying cloud-init behavior where supported
+- installing or confirming guest-agent behavior where expected
+- cleaning host keys, machine identity, cache files, and build-time state
+- restoring clone-default networking to DHCP before promotion
 
-Only approved templates should be referenced by OpenTofu environment files.
+A finalized VM is still not a classroom source until it is promoted.
 
----
+### 3. Promote golden template
 
-## Lifecycle
+After finalization, automation promotes the VM into the golden template range.
 
-### 1. Build candidate
-Automation creates or imports a candidate VM.
+Golden templates live in:
 
-Examples:
-- import qcow2 image
-- import VMDK
-- create installer-based VM shell
-- perform manual OS install if needed
+```text
+900-949
+```
 
-### 2. Validate candidate
-Before promotion, the candidate must pass its validation checklist.
+Current assignments:
 
-Typical checks:
-- boots cleanly
-- console works
-- login works
-- NIC appears
-- DHCP works on a test VNet
-- default route is present
-- gateway ping works
-- guest agent works if required
-- cloud-init works if required
+- `900`: `tpl-debian13-base`
+- `901`: `tpl-ubuntu2604-base`
+- `902`: `tpl-parrot-base`
+- `903`: `tpl-win7-base`
+- `904`: `tpl-metasploitable2-base`
 
-### 3. Promote candidate
-Once validated, the candidate is promoted to its approved template identity.
+Only promoted golden templates should be consumed by downstream deployment automation.
 
-Promotion may be done by:
-- converting the validated candidate to template form
-- cloning/moving it to the approved VMID
-- renaming it to the approved template name
+### 4. Validate with scratch clone
 
-### 4. Consume approved template
-OpenTofu and downstream automation may only use approved templates.
+After promotion, automation should create a disposable validation clone from the golden template.
+
+Validation clones live in:
+
+```text
+950-999
+```
+
+Current assignments:
+
+- `950`: Debian 13 validation clone
+- `951`: Ubuntu 26.04 validation clone
+- `952`: Parrot validation clone
+- `953`: Windows 7 validation clone
+- `954`: Metasploitable 2 validation clone
+
+Validation clones prove that the promoted template can be cloned, booted, networked, and accessed safely before classroom rollout.
+
+### 5. Consume golden template
+
+Classroom/lab workloads may be deployed only from validated golden templates.
+
+Deployment automation must not use prepared VMs, finalized-but-unpromoted VMs, or validation clones as source images.
 
 ---
 
 ## Validation policy
 
 ### All templates must pass
+
 - boot
-- console
+- console or SSH access, depending on template type
 - login
-- DHCP on a test VNet
+- DHCP on the target clone-default network
 - gateway reachability
 
 ### Linux templates should also pass
+
 - correct NIC naming
 - cloud-init behavior if applicable
-- guest agent if expected
+- guest agent detection if expected
+- clean machine identity before promotion
+- clean SSH host keys before promotion
 
 ### Windows templates should also pass
+
 - stable boot/reboot
-- storage/network drivers working
+- storage and network drivers working
 - no immediate driver-related BSOD for required devices
+- clone behavior suitable for classroom deployment
 
 ---
 
 ## Test deployment rule
 
-A newly approved template should first be deployed into a **small smoke test** before full section rollout.
+A newly promoted golden template should first be deployed into a small smoke test before full section rollout.
 
 Recommended smoke test:
-- 1 teacher VM
+
+- 1 teacher VM set
 - 1 student
 - 2 to 3 slots only
 
 Example:
+
 - `jlong-srv`
 - `cyba3-raven-01-srv`
 - `cyba3-raven-01-atk`
@@ -148,6 +162,7 @@ Only after smoke test success should a full section deployment proceed.
 Creating SDN objects is not enough.
 
 Validation must confirm:
+
 - zone exists
 - VNet exists
 - subnet exists
@@ -162,10 +177,12 @@ Validation must confirm:
 Cloud images are not equivalent to fully installed lab templates.
 
 When using cloud images:
+
 - cloud-init must be explicitly configured
 - DHCP behavior must be tested
 - guest access must be verified
 - image suitability must be validated before promotion
+- clone-default networking should return to DHCP before promotion
 
 ---
 
@@ -173,13 +190,16 @@ When using cloud images:
 
 Template metadata lives in:
 
-- `data/templates.yml`
+- `ansible/vars/templates.yml`
 
-Approved templates are referenced in environment and slot mappings only after validation.
+VMID policy lives in:
+
+- `data/bootstrap-policy.yml`
+
+Golden templates are referenced by deployment automation only after validation.
 
 ---
 
 ## Operational principle
 
-**Automate build. Validate before promotion. Deploy approved images only.**
-
+**Automate preparation. Validate before and after promotion. Deploy from golden templates only.**
