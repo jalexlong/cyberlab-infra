@@ -125,6 +125,36 @@
         delay: 2
         timeout: 120
 
+    - name: Wait for cloud-init and apt locks to settle
+      ansible.builtin.shell: |
+        ssh -i {{ finalize_ssh_private_key }} \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          {{ finalize_ssh_user }}@{{ template_guest_ip }} \
+          'sudo bash -s' <<'EOF'
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+
+        if command -v cloud-init >/dev/null 2>&1; then
+          timeout 300 cloud-init status --wait || true
+        fi
+
+        timeout 300 bash -c '
+          while fuser /var/lib/dpkg/lock >/dev/null 2>&1 \
+             || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+             || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 \
+             || fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            sleep 5
+          done
+        '
+
+        dpkg --configure -a
+        EOF
+      args:
+        executable: /bin/bash
+      register: guest_ready_result
+      changed_when: false
+
     - name: Finalize guest over SSH
       ansible.builtin.shell: |
         ssh -i {{ finalize_ssh_private_key }} \
@@ -135,8 +165,8 @@
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
 
-        apt-get update
-        apt-get install -y qemu-guest-agent cloud-init sudo curl
+        apt-get -o DPkg::Lock::Timeout=300 update
+        apt-get -o DPkg::Lock::Timeout=300 install -y qemu-guest-agent cloud-init sudo curl
 
         systemctl enable qemu-guest-agent || true
         systemctl enable cloud-init || true

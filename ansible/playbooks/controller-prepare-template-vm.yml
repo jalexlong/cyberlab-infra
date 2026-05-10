@@ -251,6 +251,34 @@
       failed_when: false
       changed_when: cloudinit_attach_result.rc == 0
 
+    - name: Set cloud-init nameserver when defined
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --nameserver
+          - "{{ template_def.nameserver }}"
+      register: set_template_nameserver
+      changed_when: set_template_nameserver.rc == 0
+      when:
+        - template_def.nameserver is defined
+        - template_def.nameserver | length > 0
+
+    - name: Set cloud-init search domain when defined
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --searchdomain
+          - "{{ template_def.searchdomain }}"
+      register: set_template_searchdomain
+      changed_when: set_template_searchdomain.rc == 0
+      when:
+        - template_def.searchdomain is defined
+        - template_def.searchdomain | length > 0
+
     - name: Remove temporary controller SSH public key file
       ansible.builtin.file:
         path: /tmp/controller-template-key.pub

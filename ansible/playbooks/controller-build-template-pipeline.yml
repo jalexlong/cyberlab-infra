@@ -138,9 +138,15 @@
           - "Bootstrap IP: {{ template_def.bootstrap_ip | default('not configured') }}"
           - "Bootstrap ipconfig0: {{ template_def.bootstrap_ipconfig0 | default('not configured') }}"
           - "Clone-default ipconfig0: {{ template_def.ipconfig0 | default('not configured') }}"
-          - "Pipeline stages: prepare -> finalize -> promote -> validate clone"
+          - "Pipeline stages: ensure template key -> prepare -> finalize -> promote -> validate clone"
       tags:
         - always
+
+- import_playbook: controller-ensure-template-key.yml
+  tags:
+    - pipeline
+    - trust
+    - template-key
 
 - import_playbook: controller-prepare-template-vm.yml
   vars:

@@ -1,0 +1,144 @@
+---
+- name: Ensure controller/template SSH key is available
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars:
+    controller_ctid: 800
+    controller_ssh_key_path: /root/.ssh/id_ed25519_controller
+    host_ssh_key_path: /root/.ssh/id_ed25519_controller
+
+  tasks:
+    - name: Ensure controller SSH directory exists inside CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - install
+          - -d
+          - -m
+          - "0700"
+          - /root/.ssh
+      changed_when: false
+
+    - name: Check whether controller SSH private key exists inside CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -f
+          - "{{ controller_ssh_key_path }}"
+      register: controller_ssh_key_check
+      failed_when: false
+      changed_when: false
+
+    - name: Generate controller SSH keypair inside CT when missing
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - ssh-keygen
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - "{{ controller_ssh_key_path }}"
+      when: controller_ssh_key_check.rc != 0
+      register: controller_ssh_key_generate
+      changed_when: controller_ssh_key_generate.rc == 0
+
+    - name: Read controller SSH public key from CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - cat
+          - "{{ controller_ssh_key_path }}.pub"
+      register: controller_ssh_public_key
+      changed_when: false
+
+    - name: Read controller SSH private key from CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - cat
+          - "{{ controller_ssh_key_path }}"
+      register: controller_ssh_private_key
+      changed_when: false
+      no_log: true
+
+    - name: Ensure root SSH directory exists on Proxmox host
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install matching template SSH private key on Proxmox host
+      ansible.builtin.copy:
+        dest: "{{ host_ssh_key_path }}"
+        content: "{{ controller_ssh_private_key.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install matching template SSH public key on Proxmox host
+      ansible.builtin.copy:
+        dest: "{{ host_ssh_key_path }}.pub"
+        content: "{{ controller_ssh_public_key.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Authorize controller public key for root on Proxmox host
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ controller_ssh_public_key.stdout }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+        state: present
+
+    - name: Validate public key is readable inside CT
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -s
+          - "{{ controller_ssh_key_path }}.pub"
+      changed_when: false
+
+    - name: Validate private key is available on Proxmox host for template finalization
+      ansible.builtin.command:
+        argv:
+          - test
+          - -s
+          - "{{ host_ssh_key_path }}"
+      changed_when: false
+
+    - name: Print template key summary
+      ansible.builtin.debug:
+        msg:
+          - "controller_ctid={{ controller_ctid }}"
+          - "controller_public_key={{ controller_ssh_key_path }}.pub"
+          - "host_private_key={{ host_ssh_key_path }}"
+          - "template_key_ready=true"
