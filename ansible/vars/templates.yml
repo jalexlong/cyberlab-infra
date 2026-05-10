@@ -37,6 +37,8 @@ templates:
     bootstrap_ip: 10.30.0.10
     bootstrap_ipconfig0: "ip=10.30.0.10/24,gw=10.30.0.1"
     ipconfig0: "ip=dhcp"
+    nameserver: 10.30.0.1
+    searchdomain: cyberlab.local
 
     boot: order=scsi0
     description: "Cyberlab Debian 13 base template"

@@ -125,6 +125,54 @@
         delay: 2
         timeout: 120
 
+    - name: Configure guest provisioning DNS when template nameserver is defined
+      ansible.builtin.shell: |
+        ssh -i {{ finalize_ssh_private_key }} \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          {{ finalize_ssh_user }}@{{ template_guest_ip }} \
+          'sudo bash -s' <<'EOF'
+        set -euo pipefail
+
+        NAMESERVER="{{ template_def.nameserver | default('') }}"
+        SEARCHDOMAIN="{{ template_def.searchdomain | default('') }}"
+
+        if [ -n "${NAMESERVER}" ]; then
+          rm -f /etc/resolv.conf
+
+          if [ -n "${SEARCHDOMAIN}" ]; then
+            printf 'search %s\n' "${SEARCHDOMAIN}" > /etc/resolv.conf
+          fi
+
+          printf 'nameserver %s\n' "${NAMESERVER}" >> /etc/resolv.conf
+
+          mkdir -p /etc/systemd/resolved.conf.d
+          cat > /etc/systemd/resolved.conf.d/cyberlab.conf <<RESOLVED
+        [Resolve]
+        DNS=${NAMESERVER}
+        Domains=${SEARCHDOMAIN}
+        FallbackDNS=
+        RESOLVED
+
+          systemctl restart systemd-resolved || true
+        fi
+
+        echo "=== guest network ==="
+        ip -br addr
+        ip route
+        cat /etc/resolv.conf || true
+
+        echo "=== IPv4 DNS check ==="
+        timeout 20 getent ahostsv4 deb.debian.org
+        EOF
+      args:
+        executable: /bin/bash
+      register: guest_dns_result
+      changed_when: false
+      when:
+        - template_def.nameserver is defined
+        - template_def.nameserver | length > 0
+
     - name: Wait for cloud-init and apt locks to settle
       ansible.builtin.shell: |
         ssh -i {{ finalize_ssh_private_key }} \
@@ -165,8 +213,12 @@
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
 
-        apt-get -o DPkg::Lock::Timeout=300 update
-        apt-get -o DPkg::Lock::Timeout=300 install -y qemu-guest-agent cloud-init sudo curl
+        cat > /etc/apt/apt.conf.d/99cyberlab-force-ipv4 <<'APT'
+        Acquire::ForceIPv4 "true";
+        APT
+
+        apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 update
+        apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 install -y qemu-guest-agent cloud-init sudo curl
 
         systemctl enable qemu-guest-agent || true
         systemctl enable cloud-init || true
@@ -186,6 +238,11 @@
         rm -rf /var/tmp/*
         rm -f /root/.bash_history
         rm -f /home/{{ finalize_ssh_user }}/.bash_history
+
+        rm -f /etc/apt/apt.conf.d/99cyberlab-force-ipv4
+        rm -f /etc/systemd/resolved.conf.d/cyberlab.conf
+        rm -f /etc/resolv.conf
+        ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true
 
         sync
         EOF

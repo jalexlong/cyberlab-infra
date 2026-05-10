@@ -105,6 +105,39 @@
       register: sdn_apply
       changed_when: sdn_apply.rc == 0
 
+
+    - name: Enable IPv4 forwarding persistently for Cyberlab SDN SNAT
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-cyberlab-forwarding.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward=1
+
+    - name: Apply IPv4 forwarding immediately
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -w
+          - net.ipv4.ip_forward=1
+      changed_when: false
+
+    - name: Read IPv4 forwarding state
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -n
+          - net.ipv4.ip_forward
+      register: ipv4_forward_result
+      changed_when: false
+
+    - name: Require IPv4 forwarding for Cyberlab SDN SNAT
+      ansible.builtin.assert:
+        that:
+          - ipv4_forward_result.stdout | trim == "1"
+        fail_msg: "Cyberlab SDN SNAT requires net.ipv4.ip_forward=1."
+
     - name: Reload networking
       ansible.builtin.command:
         argv:
