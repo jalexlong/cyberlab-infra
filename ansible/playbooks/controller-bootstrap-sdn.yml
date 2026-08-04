@@ -44,12 +44,23 @@
 
     # Classroom networks. isolate_ports is false so students in a section can
     # interact; snat is false so a section network has no egress at all.
+    #
+    # Proxmox restricts VNet aliases to letters, digits, hyphen, underscore,
+    # period and space, so section aliases are sanitised rather than passed
+    # through. Course names such as "IT & Security - A2" are otherwise rejected
+    # with an unhelpful "value does not match the regex pattern" error partway
+    # through the loop, leaving some VNets created and others missing.
     section_vnets: >-
       {%- set out = [] -%}
       {%- for key, sec in (env_sections | dictsort) -%}
       {%-   set _ = out.append({
               'name': sec.vnet,
-              'alias': (sections_data.sections[key].alias | default(key)),
+              'alias': (
+                (sections_data.sections[key].alias | default(key))
+                | regex_replace('[^A-Za-z0-9_. -]', ' ')
+                | regex_replace(' +', ' ')
+                | trim
+              ),
               'isolate_ports': false
             }) -%}
       {%- endfor -%}
