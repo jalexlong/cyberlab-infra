@@ -70,6 +70,54 @@
       register: proxmox_version_response
       no_log: true
 
+    # /version is readable by any authenticated user, so reaching it proves only
+    # that the token exists. Query the token's own effective permissions to
+    # prove it can actually do privileged work; without this an unprivileged
+    # token reports a passing validation and then fails at first real use.
+    - name: Query effective permissions for the automation token
+      ansible.builtin.uri:
+        url: "{{ proxmox_api_env.PROXMOX_API_URL }}/access/permissions"
+        method: GET
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_env.PROXMOX_API_TOKEN_ID }}={{ proxmox_api_env.PROXMOX_API_TOKEN_SECRET }}"
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: proxmox_permissions_response
+      no_log: true
+
+    - name: Collect privileges granted at the root path
+      ansible.builtin.set_fact:
+        proxmox_root_privs: >-
+          {{
+            (proxmox_permissions_response.json.data['/'] | default({}))
+            | dict2items
+            | selectattr('value', 'equalto', 1)
+            | map(attribute='key')
+            | list
+          }}
+
+    - name: Require the automation token holds privileges needed by the platform
+      ansible.builtin.assert:
+        that:
+          - required_proxmox_privs | difference(proxmox_root_privs) | length == 0
+        fail_msg: >-
+          The automation token authenticates but is missing required privileges
+          at '/': {{ required_proxmox_privs | difference(proxmox_root_privs) | join(', ') }}.
+          Re-run host-bootstrap.yml to reconcile the automation role and ACL.
+        success_msg: >-
+          Automation token holds all {{ required_proxmox_privs | length }} required
+          privileges at '/'.
+      vars:
+        required_proxmox_privs:
+          - SDN.Allocate
+          - VM.Allocate
+          - VM.Clone
+          - VM.Config.Network
+          - Datastore.AllocateSpace
+          - Pool.Allocate
+          - Sys.Modify
+
     - name: Show Proxmox API validation result
       ansible.builtin.debug:
         msg:
@@ -77,4 +125,5 @@
           - "Version: {{ proxmox_version_response.json.data.version }}"
           - "Release: {{ proxmox_version_response.json.data.release }}"
           - "Repo ID: {{ proxmox_version_response.json.data.repoid }}"
+          - "Privileges at '/': {{ proxmox_root_privs | length }} granted"
 

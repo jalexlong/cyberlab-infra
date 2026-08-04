@@ -9,6 +9,51 @@
     controller_secrets_dir: /root/cyberlab-infra/private/secrets
     controller_ssh_key_path: /root/.ssh/id_ed25519_controller
 
+    # Least-privilege role for the automation identity. This is Administrator
+    # minus Permissions.Modify, Realm.Allocate, Mapping.Modify and Sys.Incoming,
+    # so the automation account cannot rewrite the permission system, create
+    # realms, or alter hardware mappings. PVEAdmin alone is insufficient because
+    # it lacks Sys.Modify, which applying SDN configuration requires.
+    automation_role_id: CyberlabAutomation
+    automation_role_privs:
+      - Datastore.Allocate
+      - Datastore.AllocateSpace
+      - Datastore.AllocateTemplate
+      - Datastore.Audit
+      - Group.Allocate
+      - Pool.Allocate
+      - Pool.Audit
+      - Realm.AllocateUser
+      - User.Modify
+      - SDN.Allocate
+      - SDN.Audit
+      - SDN.Use
+      - Sys.AccessNetwork
+      - Sys.Audit
+      - Sys.Console
+      - Sys.Modify
+      - Sys.PowerMgmt
+      - Sys.Syslog
+      - VM.Allocate
+      - VM.Audit
+      - VM.Backup
+      - VM.Clone
+      - VM.Config.CDROM
+      - VM.Config.CPU
+      - VM.Config.Cloudinit
+      - VM.Config.Disk
+      - VM.Config.HWType
+      - VM.Config.Memory
+      - VM.Config.Network
+      - VM.Config.Options
+      - VM.Console
+      - VM.GuestAgent.Audit
+      - VM.GuestAgent.Unrestricted
+      - VM.Migrate
+      - VM.PowerMgmt
+      - VM.Snapshot
+      - VM.Snapshot.Rollback
+
     proxmox_api_user: cyberlab-automation@pve
     proxmox_api_token_name: automation
     proxmox_api_token_id_full: "{{ proxmox_api_user }}!{{ proxmox_api_token_name }}"
@@ -238,23 +283,53 @@
       become: true
 
     - name: Create automation API token
-      ansible.builtin.command: >
-        pveum user token add
-        {{ bootstrap_policy.bootstrap.proxmox.automation_user }}
-        {{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}
-        --privsep 0
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - user
+          - token
+          - add
+          - "{{ bootstrap_policy.bootstrap.proxmox.automation_user }}"
+          - "{{ bootstrap_policy.bootstrap.proxmox.automation_token_id }}"
+          - --privsep
+          - "0"
+          - --output-format
+          - json
       register: automation_token_create
       when:
         - automation_token_create_required | bool
       become: true
+      no_log: true
+
+    # Proxmox only ever exposes an API token secret at creation time. If this
+    # extraction fails the secret is unrecoverable and the token must be
+    # rotated, so parse the documented JSON form and fall back to a UUID scan
+    # of the human-readable table only if --output-format was not honoured.
+    - name: Extract automation API token secret
+      ansible.builtin.set_fact:
+        automation_token_secret: >-
+          {{
+            (automation_token_create.stdout | from_json).get('value', '')
+            if (automation_token_create.stdout | trim).startswith('{')
+            else (
+              automation_token_create.stdout
+              | regex_search('[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+              | default('', true)
+            )
+          }}
+      when:
+        - automation_token_create_required | bool
+        - automation_token_create is defined
+        - (automation_token_create.stdout | default('')) | length > 0
+      no_log: true
 
     - name: Show automation token reconciliation output
       ansible.builtin.debug:
         msg: >-
           {{
-            automation_token_create.stdout_lines
-            if (automation_token_create is defined and automation_token_create.stdout is defined)
-            else ['Token already existed and controller secret file was present; no token change made.']
+            'Automation API token created or rotated; secret captured for controller handoff.'
+            if (automation_token_secret | default('') | length > 0)
+            else 'Token already existed and controller secret file was present; no token change made.'
           }}
 
     - name: Require created automation token secret when token was created
@@ -268,6 +343,92 @@
           repaired without this value.
       when:
         - automation_token_create_required | bool
+
+    - name: Check whether the Cyberlab automation role exists
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - role
+          - list
+          - --output-format
+          - json
+      register: pveum_role_list
+      changed_when: false
+      become: true
+
+    - name: Create the Cyberlab automation role
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - role
+          - add
+          - "{{ automation_role_id }}"
+          - --privs
+          - "{{ automation_role_privs | join(',') }}"
+      when: automation_role_id not in (pveum_role_list.stdout | from_json | map(attribute='roleid') | list)
+      become: true
+
+    - name: Reconcile the Cyberlab automation role privileges
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - role
+          - modify
+          - "{{ automation_role_id }}"
+          - --privs
+          - "{{ automation_role_privs | join(',') }}"
+      when: automation_role_id in (pveum_role_list.stdout | from_json | map(attribute='roleid') | list)
+      changed_when: true
+      become: true
+
+    - name: Grant the automation user its role at the root path
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - acl
+          - modify
+          - /
+          - --users
+          - "{{ bootstrap_policy.bootstrap.proxmox.automation_user }}"
+          - --roles
+          - "{{ automation_role_id }}"
+          - --propagate
+          - "1"
+      register: automation_acl_grant
+      changed_when: true
+      become: true
+
+    - name: Read back the automation user ACL
+      ansible.builtin.command:
+        argv:
+          - pveum
+          - acl
+          - list
+          - --output-format
+          - json
+      register: automation_acl_list
+      changed_when: false
+      become: true
+
+    - name: Require the automation user holds its role at the root path
+      ansible.builtin.assert:
+        that:
+          - automation_acl_matches | length > 0
+        fail_msg: >-
+          {{ bootstrap_policy.bootstrap.proxmox.automation_user }} does not hold
+          role {{ automation_role_id }} on '/'. Without it the API token
+          authenticates but can perform no privileged action, and API-driven
+          automation will fail in ways that /version checks do not detect.
+      vars:
+        automation_acl_matches: >-
+          {{
+            automation_acl_list.stdout
+            | from_json
+            | selectattr('path', 'equalto', '/')
+            | selectattr('roleid', 'equalto', automation_role_id)
+            | selectattr('ugid', 'equalto', bootstrap_policy.bootstrap.proxmox.automation_user)
+            | list
+          }}
 
     - name: Check whether controller LXC already exists
       command: "pct config {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
