@@ -332,6 +332,77 @@ closed rack. Resolve the student-network question above. Publish BOM v1.
 
 **Exit:** a running 3-node cluster you have measured, not estimated.
 
+#### Benchmark framing
+
+The workload is mostly idle VMs with bursty activity (a student exploiting
+something, a compile, a boot storm at the start of class), not sustained
+compute. Raw CPU benchmarks (Passmark/Geekbench) are a weak proxy for node
+selection. Two better filters:
+
+- **Procurement-time coarse filter** — cheap to check before buying: 4c/8t
+  floor, 6c/12t preferred (concurrency headroom, not per-VM speed); RAM
+  ceiling *actually reachable*, not official QVL, since corporate SFF boards
+  routinely run 64GB unofficially past what the spec sheet claims (2×32GB
+  DDR4 SODIMM — verify per-model on r/MiniPCs or ServeTheHome before buying in
+  bulk); a real NVMe M.2 slot, not SATA-only or eMMC, since concurrent
+  linked-clone boot storms at class start are a random-4K-IOPS problem, not a
+  sequential-throughput one; VT-x/VT-d or AMD-V/AMD-Vi present (universal by
+  the targeted era, but confirm on any oddball unit).
+- **Post-acquisition validation benchmark** — buy one candidate node before
+  committing to the fleet, boot N concurrent linked clones (2-3 pods worth),
+  time to guest-agent-ready, and watch actual RAM/CPU consumed. This doubles
+  as the check on whether `slots.yml` sizing (already flagged above as too
+  generous) is realistic. One unit validated beats five units estimated.
+
+#### Hardware generation, given the DRAM pricing crisis
+
+| Generation | Verdict | Why |
+|---|---|---|
+| DDR5 (12th gen Intel+/Ryzen 7000+) | Skip | Squeezed hardest by the current DRAM price spike, and these units are still early in corporate first-owner life so they aren't flooding refurb/liquidation channels yet. Bad on both cost axes. |
+| DDR3 (2nd-4th gen Intel, pre-~2015) | Skip for primary nodes | Cheapest and most abundant on the refurb market, but typically caps at 16-32GB/node — blows the 64GB/node target and forces chasing the RAM budget with more nodes instead of more RAM. Only worth it as a free throwaway ancillary box (time source, local DNS, teacher jump host). |
+| DDR4, 8th-10th gen Intel (Coffee Lake / Coffee Lake Refresh / Comet Lake) | **Target** | Sweet spot today: heavy corporate refresh liquidation keeps supply plentiful, DDR4 SODIMM pricing hasn't spiked like DDR5 since fab capacity didn't need to shift, and 6c/12t (i5-8500T/i7-8700T/i5-10500T) is available versus quad-core-only on the prior generation. |
+| DDR4, 6th-7th gen Intel (Skylake/Kaby Lake) | Budget/pilot floor | Cheapest DDR4 entry, quad-core, officially 32GB (sometimes 64GB unofficially — check per-model). Reasonable for a 3-node pilot or a 5th node added later; not what the whole BOM should anchor to. |
+| AMD Ryzen PRO 4000/5000 (Renoir/Cezanne) | Opportunistic | Strong core count/IPC for the era on DDR4, but AMD's corporate fleet share was small so these don't show up in bulk refurb lots the way Intel does. Grab them cheap when found; don't plan procurement around finding enough. |
+
+Node candidates in the target generation: Lenovo ThinkCentre M720q/M920q/M75q,
+HP EliteDesk/ProDesk 600/800 G4/G5 Mini, Dell OptiPlex 5070/7070 Micro.
+Budget-floor candidates: ThinkCentre M700/M900, EliteDesk 800 G2/G3, OptiPlex
+3040/5050/7040 Micro. AMD candidates: EliteDesk 705 G4/G5 Mini, ThinkCentre
+M75q Gen2.
+
+#### Switch
+
+3-5 nodes plus a teacher console plus a possible WAP (if student-network
+Model B is chosen) is 5-7 ports before adding slack — **8-port unmanaged**
+over 5-port. Pod affinity keeps VM traffic node-local by design, so the
+switch only ever carries corosync heartbeat, template sync, and
+management/Guacamole traffic: gigabit unmanaged is plenty. Keep it dumb on
+purpose — zero config is consistent with "reproducible from the public
+recipe," and a managed switch is one more thing to document and one more
+thing that can drift from the recipe.
+
+#### Rack
+
+None of the candidate chassis are rack-eared, and footprints vary by vendor
+and generation — buying a mixed/variable fleet across generations to chase
+value means a 19" rack would just become a mounting frame for flat shelf
+trays, at more cost and weight for no real benefit at this scale. A
+**rolling open-shelf A/V cart** fits better: cheap, doesn't lock the BOM to
+one chassis shape, gives good airflow for the thermal-under-load exit
+criterion above, and — important given refurb reliability variance — allows
+easy physical access to swap a dead unit without unracking anything. Put the
+unmanaged switch and a power strip/PDU on the same shelf.
+
+Power math supports the form factor choice: SFF/Tiny units run roughly
+35-65W under load, so even 5 nodes + switch stays well under 500W total —
+nowhere near stressing a standard classroom 15A circuit.
+
+#### Still open
+
+None of the above resolves the student-network question (Model A vs B)
+above, and that materially changes port count and whether a WAP belongs on
+the same cart/circuit. Pin it down before locking BOM v1.
+
 ### Phase 4 — Pod provisioning engine (Nov-Dec 2026)
 
 `pod up`, `pod down`, `pod reset`. Node scheduler with pod affinity. Linked
