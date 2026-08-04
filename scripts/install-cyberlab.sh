@@ -278,7 +278,7 @@ run_host_bootstrap() {
 
   local -a extra_args=()
 
-  if [[ "#{ROTATE_API_TOKEN}" == "1" ]]; then
+  if [[ "${ROTATE_API_TOKEN}" == "1" ]]; then
 	  log "API token rotation requested"
 	  extra_args+=("-e" "cyberlab_rotate_api_token=true")
   fi

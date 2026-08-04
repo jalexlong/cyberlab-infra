@@ -86,7 +86,7 @@ def validate_inputs(
 
         student_count = section_data.get("student_count")
         if not isinstance(student_count, int) or student_count < 0:
-            raiseValueError(f"Section {section_key} has invalid student_count")
+            raise ValueError(f"Section {section_key} has invalid student_count")
 
     for section_key in environment_sections:
         if section_key not in sections:
