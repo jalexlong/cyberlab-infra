@@ -1,16 +1,119 @@
 ---
+# Bootstrap Proxmox SDN for Cyberlab.
+#
+# Builds two classes of network:
+#
+#   1. Infrastructure networks, declared in ansible/inventory.yml under
+#      proxmox_sdn. Currently just prov0, the provisioning network used to
+#      build templates. This one keeps SNAT so template builds can reach
+#      package repositories.
+#
+#   2. Per-section classroom networks, derived from
+#      data/environments/<env>.yml. These deliberately have SNAT disabled so
+#      lab traffic cannot reach the school network or the internet, and
+#      isolate-ports disabled so students within a section can reach each
+#      other's machines.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml -e cyberlab_env=demo-lab
+#
+# This playbook is additive. It never deletes VNets or subnets it does not
+# recognise, so hand-built networks are left untouched.
+
 - name: Bootstrap Proxmox SDN from controller
   hosts: proxmox_targets
   gather_facts: false
 
   vars:
+    cyberlab_env: school-lab
+
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    sections_file: "{{ repo_root }}/data/sections.yml"
+
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    sections_data: "{{ lookup('file', sections_file) | from_yaml }}"
+    env_sections: "{{ environment_data.environment.sections | default({}) }}"
+
     zone_name: "{{ proxmox_sdn.zone.name }}"
     zone_type: "{{ proxmox_sdn.zone.type }}"
     zone_dhcp: "{{ proxmox_sdn.zone.dhcp }}"
     zone_ipam: "{{ proxmox_sdn.zone.ipam }}"
     zone_mtu: "{{ proxmox_sdn.zone.mtu }}"
 
+    # Classroom networks. isolate_ports is false so students in a section can
+    # interact; snat is false so a section network has no egress at all.
+    section_vnets: >-
+      {%- set out = [] -%}
+      {%- for key, sec in (env_sections | dictsort) -%}
+      {%-   set _ = out.append({
+              'name': sec.vnet,
+              'alias': (sections_data.sections[key].alias | default(key)),
+              'isolate_ports': false
+            }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+    section_subnets: >-
+      {%- set out = [] -%}
+      {%- for key, sec in (env_sections | dictsort) -%}
+      {%-   set _ = out.append({
+              'name': sec.vnet,
+              'subnet': sec.subnet,
+              'gateway': sec.gateway,
+              'snat': false,
+              'dhcp_start': sec.dhcp_start,
+              'dhcp_end': sec.dhcp_end
+            }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+    all_vnets: "{{ (proxmox_sdn.vnets | default([])) + section_vnets }}"
+    all_subnets: "{{ (proxmox_sdn.subnets | default([])) + section_subnets }}"
+
   tasks:
+    - name: Require every environment section to exist in sections.yml
+      ansible.builtin.assert:
+        that:
+          - env_sections.keys() | difference(sections_data.sections.keys() | list) | length == 0
+        fail_msg: >-
+          {{ environment_file }} references sections that are absent from
+          {{ sections_file }}:
+          {{ env_sections.keys() | difference(sections_data.sections.keys() | list) | join(', ') }}
+
+    # Proxmox rejects VNet names longer than 8 characters. This is why the data
+    # model uses compact identifiers such as t101c213 rather than the full
+    # section key.
+    - name: Require VNet names to fit the Proxmox 8 character limit
+      ansible.builtin.assert:
+        that:
+          - oversized_vnets | length == 0
+        fail_msg: >-
+          These VNet names exceed the Proxmox 8 character limit:
+          {{ oversized_vnets | join(', ') }}
+      vars:
+        oversized_vnets: >-
+          {{ all_vnets | map(attribute='name') | select('match', '^.{9,}$') | list }}
+
+    - name: Require VNet names to be unique
+      ansible.builtin.assert:
+        that:
+          - (all_vnets | map(attribute='name') | list | length)
+            == (all_vnets | map(attribute='name') | unique | list | length)
+        fail_msg: >-
+          Duplicate VNet names detected across infrastructure and section
+          networks: {{ all_vnets | map(attribute='name') | list | sort | join(', ') }}
+
+    - name: Show the SDN plan
+      ansible.builtin.debug:
+        msg:
+          - "environment: {{ cyberlab_env }}"
+          - "zone: {{ zone_name }}"
+          - "infrastructure vnets: {{ proxmox_sdn.vnets | default([]) | map(attribute='name') | join(', ') }}"
+          - "section vnets: {{ section_vnets | map(attribute='name') | join(', ') }}"
+          - "section networks have snat=false and isolate-ports=false"
+
     - name: Check whether SDN zone exists
       ansible.builtin.command:
         argv:
@@ -45,7 +148,7 @@
           - pvesh
           - get
           - "/cluster/sdn/vnets/{{ item.name }}"
-      loop: "{{ proxmox_sdn.vnets }}"
+      loop: "{{ all_vnets }}"
       loop_control:
         label: "{{ item.name }}"
       register: vnet_checks
@@ -87,9 +190,9 @@
           - "{{ 1 if item.snat else 0 }}"
           - --dhcp-range
           - "start-address={{ item.dhcp_start }},end-address={{ item.dhcp_end }}"
-      loop: "{{ proxmox_sdn.subnets | default([]) }}"
+      loop: "{{ all_subnets }}"
       loop_control:
-        label: "{{ item.name }} {{ item.subnet }}"
+        label: "{{ item.name }} {{ item.subnet }} snat={{ item.snat }}"
       register: subnet_create_results
       failed_when:
         - subnet_create_results.rc != 0
@@ -104,7 +207,6 @@
           - /cluster/sdn
       register: sdn_apply
       changed_when: sdn_apply.rc == 0
-
 
     - name: Enable IPv4 forwarding persistently for Cyberlab SDN SNAT
       ansible.builtin.copy:
@@ -146,6 +248,39 @@
       register: ifreload_result
       changed_when: ifreload_result.rc == 0
 
+    - name: Verify every expected VNet interface exists on the host
+      ansible.builtin.command:
+        argv:
+          - ip
+          - -br
+          - link
+          - show
+          - "{{ item.name }}"
+      loop: "{{ all_vnets }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vnet_iface_checks
+      failed_when: false
+      changed_when: false
+
+    - name: Require every expected VNet interface to be present
+      ansible.builtin.assert:
+        that:
+          - missing_vnet_ifaces | length == 0
+        fail_msg: >-
+          SDN objects were created but these VNet interfaces are absent from the
+          host: {{ missing_vnet_ifaces | join(', ') }}.
+          Creating SDN objects is not sufficient; the interfaces must exist
+          before templates or pods are blamed for missing connectivity.
+      vars:
+        missing_vnet_ifaces: >-
+          {{
+            vnet_iface_checks.results
+            | rejectattr('rc', 'equalto', 0)
+            | map(attribute='item.name')
+            | list
+          }}
+
     - name: Show resulting SDN zones
       ansible.builtin.command:
         argv:
@@ -168,14 +303,17 @@
       register: vnets_out
       changed_when: false
 
-    - name: Show resulting SDN subnets
+    - name: Show resulting subnets for each VNet
       ansible.builtin.command:
         argv:
           - pvesh
           - get
-          - /cluster/sdn/vnets/prov0/subnets
+          - "/cluster/sdn/vnets/{{ item.name }}/subnets"
           - --output-format
           - yaml
+      loop: "{{ all_vnets }}"
+      loop_control:
+        label: "{{ item.name }}"
       register: subnets_out
       changed_when: false
       failed_when: false
@@ -185,4 +323,4 @@
         msg:
           - "{{ zones_out.stdout }}"
           - "{{ vnets_out.stdout }}"
-          - "{{ subnets_out.stdout | default('') }}"
+          - "{{ subnets_out.results | map(attribute='stdout') | list }}"
