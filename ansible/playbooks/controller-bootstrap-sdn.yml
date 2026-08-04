@@ -199,6 +199,32 @@
         - "'already defined' not in (subnet_create_results.stderr | default(''))"
       changed_when: subnet_create_results.rc == 0
 
+    # Subnet creation is skipped when the subnet already exists, so a setting
+    # changed in the data model would otherwise never reach an existing
+    # deployment. prov0 on the school-lab host is exactly this case: it was
+    # created before a DHCP range was declared and has had none since, which
+    # silently prevents any guest on the provisioning network from obtaining a
+    # lease and makes template validation fail for reasons unrelated to the
+    # image. Reconcile settings explicitly rather than assuming creation
+    # covered them.
+    - name: Reconcile settings on existing subnets
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - set
+          - "/cluster/sdn/vnets/{{ item.name }}/subnets/{{ zone_name }}-{{ item.subnet | replace('/', '-') }}"
+          - --gateway
+          - "{{ item.gateway }}"
+          - --snat
+          - "{{ 1 if item.snat else 0 }}"
+          - --dhcp-range
+          - "start-address={{ item.dhcp_start }},end-address={{ item.dhcp_end }}"
+      loop: "{{ all_subnets }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.subnet }} snat={{ item.snat }} dhcp={{ item.dhcp_start }}-{{ item.dhcp_end }}"
+      register: subnet_reconcile_results
+      changed_when: subnet_reconcile_results.rc == 0
+
     - name: Apply SDN configuration
       ansible.builtin.command:
         argv:

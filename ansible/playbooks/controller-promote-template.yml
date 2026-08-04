@@ -97,6 +97,42 @@
           The promote stage attempted graceful shutdown if the VM was running,
           but it did not reach stopped state.
 
+    # Cyberlab templates ship without a network interface by convention.
+    # Attachment is an explicit decision made at clone time, either by the
+    # validation stage or by the pod engine pointing the clone at its section
+    # VNet, so a clone can never silently inherit whichever bridge the template
+    # happened to be built on. Strip before conversion, since a VM's network
+    # configuration cannot be edited once it is a template.
+    - name: Read VM config before stripping network interfaces
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ template_def.vmid | string }}"
+      register: promote_vm_config
+      changed_when: false
+
+    - name: Strip network interfaces from the template
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.vmid | string }}"
+          - --delete
+          - "{{ promote_net_devices | join(',') }}"
+      when:
+        - "'template: 1' not in promote_vm_config.stdout"
+        - promote_net_devices | length > 0
+      changed_when: true
+      vars:
+        promote_net_devices: >-
+          {{
+            promote_vm_config.stdout_lines
+            | select('match', '^net[0-9]+:')
+            | map('regex_replace', '^(net[0-9]+):.*$', '\1')
+            | list
+          }}
+
     - name: Check whether VM is already a template
       ansible.builtin.shell: >
         qm config {{ template_def.vmid }} | grep -q '^template: 1$'

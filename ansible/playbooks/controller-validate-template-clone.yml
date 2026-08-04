@@ -169,6 +169,21 @@
       register: validation_clone_create
       changed_when: validation_clone_create.rc == 0
 
+    # Templates are NIC-less by convention, so the validation clone has no
+    # network interface until one is attached here. Without this the guest
+    # agent reports only loopback and both the address assertion and the
+    # gateway ping fail for reasons that have nothing to do with the image.
+    - name: Attach a provisioning NIC to the validation clone
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ template_def.test_clone_vmid | string }}"
+          - --net0
+          - "{{ template_def.net_model | default('virtio') }},bridge={{ template_def.bridge }}"
+      register: validation_clone_nic
+      changed_when: validation_clone_nic.rc == 0
+
     - name: Ensure validation clone uses DHCP cloud-init networking when configured
       ansible.builtin.command:
         argv:
