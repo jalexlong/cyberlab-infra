@@ -192,6 +192,21 @@
         update_cache: true
       become: true
 
+    # Proxmox SDN runs its own per-zone dnsmasq@<zone> instances. Debian's
+    # dnsmasq package enables the stock dnsmasq.service on install, which binds
+    # 0.0.0.0:53 and so prevents every zone instance from binding its VNet
+    # addresses. The zone service then dies with "Address already in use" and no
+    # guest on any SDN network can obtain a lease. That failure is silent at
+    # bootstrap time and surfaces much later as templates or pods that appear to
+    # have no connectivity, so disable the stock service at the point the
+    # package is installed.
+    - name: Disable the stock dnsmasq service in favour of SDN zone instances
+      ansible.builtin.systemd_service:
+        name: dnsmasq.service
+        state: stopped
+        enabled: false
+      become: true
+
     - name: Check whether Proxmox automation user exists
       command: "pveum user list"
       register: pveum_user_list

@@ -318,6 +318,35 @@
             | list
           }}
 
+    # docs/platform-pipeline.md requires proving the dnsmasq-backed service is
+    # actually serving, not merely that SDN objects were written. The zone
+    # instance fails to start if anything else already holds :53 on the host,
+    # most commonly Debian's stock dnsmasq.service, and without it no guest on
+    # any VNet can obtain a lease.
+    - name: Check the SDN zone DHCP service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - "dnsmasq@{{ zone_name }}.service"
+      register: zone_dnsmasq_state
+      changed_when: false
+      failed_when: false
+
+    - name: Require the SDN zone DHCP service to be running
+      ansible.builtin.assert:
+        that:
+          - zone_dnsmasq_state.stdout | trim == 'active'
+        fail_msg: >-
+          dnsmasq@{{ zone_name }}.service is '{{ zone_dnsmasq_state.stdout | trim }}',
+          so no guest on any VNet in this zone can obtain a DHCP lease.
+          Check whether Debian's stock dnsmasq.service is running and bound to
+          0.0.0.0:53, which prevents the zone instance from binding its VNet
+          addresses:
+            systemctl disable --now dnsmasq.service
+            systemctl restart dnsmasq@{{ zone_name }}.service
+        success_msg: "dnsmasq@{{ zone_name }}.service is active and serving the zone."
+
     - name: Show resulting SDN zones
       ansible.builtin.command:
         argv:
