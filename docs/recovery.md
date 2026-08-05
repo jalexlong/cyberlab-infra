@@ -172,10 +172,12 @@ If a token secret was ever committed or exposed, treat it as compromised and rot
 
 ---
 
-## `prov0` already exists
+## `prov0` is missing, or already exists
 
 Symptoms:
 
+- Template prepare or clone validation fails attaching a NIC, because
+  `bridge=prov0` names a bridge the host does not have.
 - SDN bootstrap reports that `prov0` already exists.
 - Installer fails while creating SDN objects.
 
@@ -184,15 +186,14 @@ Inspect:
 ```bash
 pvesh get /cluster/sdn/zones
 pvesh get /cluster/sdn/vnets
-pvesh get /cluster/sdn/subnets
+# Subnets are addressed per VNet. There is no /cluster/sdn/subnets
+# collection endpoint — asking for one returns "No 'get' handler defined".
+pvesh get /cluster/sdn/vnets/prov0/subnets
 cat /etc/pve/sdn/zones.cfg
 cat /etc/pve/sdn/vnets.cfg
 cat /etc/pve/sdn/subnets.cfg
+ip -br addr show prov0
 ```
-
-Recovery:
-
-If the existing SDN objects match Cyberlab policy, prefer idempotent re-apply rather than deletion.
 
 Expected provisioning network:
 
@@ -201,9 +202,47 @@ zone: virtnet
 vnet: prov0
 subnet: 10.30.0.0/24
 gateway: 10.30.0.1
+snat: 1
+dhcp: 10.30.0.100-10.30.0.199
 ```
 
-If the existing objects are wrong, remove only the incorrect Cyberlab SDN objects after confirming they are not in use.
+### If `prov0` is missing
+
+Rebuild it. This is the normal path after a deliberate SDN teardown, and it is
+safe to run against a host that already has it:
+
+```bash
+# from CT 800
+cd /root/cyberlab-infra/ansible
+ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml
+```
+
+This builds the zone and `prov0` only. Classroom VNets are gated behind
+`-e cyberlab_sdn_build_sections=true` and are not created by default.
+
+Then confirm DHCP is actually serving, not merely that the objects exist:
+
+```bash
+systemctl is-active dnsmasq@virtnet     # must be active
+systemctl is-enabled dnsmasq.service    # must be disabled
+```
+
+The stock `dnsmasq.service` binds `0.0.0.0:53` and prevents the per-zone
+instance from binding its VNet addresses. If the zone service is dead, that is
+the first thing to check — see the dnsmasq section of this document.
+
+### If `prov0` already exists
+
+If the existing SDN objects match Cyberlab policy, prefer idempotent re-apply
+rather than deletion. The playbook above is additive and safe to re-run.
+
+If the existing objects are wrong, remove only the incorrect Cyberlab SDN
+objects after confirming they are not in use. Deletion is innermost first —
+subnets, then VNets, then the zone, then `pvesh set /cluster/sdn` to apply. A
+subnet that refuses to delete with `not empty` has IPAM allocations against it;
+release them with `pvesh delete /cluster/sdn/vnets/<vnet>/ips --ip <ip> --zone
+<zone>` first. Those allocations can be stale, naming guests that no longer
+exist or never lived on this host.
 
 ---
 

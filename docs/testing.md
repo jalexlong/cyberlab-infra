@@ -167,9 +167,10 @@ See the lint retirements in `docs/roadmap.md`.
 Not exercised: the validation clone plan and full pipeline below. The session
 turned to teardown before they were run.
 
-**These SDN results are now historical.** All SDN was removed from both hosts
-later the same day, so `prov0` and the section VNets no longer exist. The
-checkpoint above still describes what the code proved when it ran.
+**The section-VNet results are historical.** All SDN was removed from both
+hosts later the same day. `prov0` was restored on `pve1` shortly after (see
+below); the four section VNets were not and do not exist. The checkpoint above
+still describes what the code proved when it ran.
 
 ### Phase 0 installer runs: 2026-08-05, `pve1`
 
@@ -189,10 +190,18 @@ files. `vmbr0` and the physical NICs were not touched.
 | 4 | after `9e463b0` | `changed=8` | stayed up |
 | 5 | after `ab9762c` | `changed=2` | stayed up |
 | 6 | after `ab9762c` | `changed=2` | stayed up |
+| 7 | after `031629f`, no skip flags | `changed=2` | stayed up |
 
 Every run exited zero and reported `failed=0`; API validation was
 `changed=0` throughout, ending `Automation token holds all 7 required
 privileges at '/'`.
+
+Run 7 is the first with **no flags at all**. Once
+`cyberlab_sdn_build_sections` defaulted to false (`031629f`), the SDN stage
+became safe to leave enabled: it rebuilt the zone and `prov0` and did not
+touch the classroom networks. `--skip-sdn-bootstrap` is no longer needed for
+routine runs. Its SDN stage reported `changed=3` — the three known
+always-changed command tasks.
 
 **Exit zero twice would have hidden all three defects.** The signal was
 `changed` on a second run against an unchanged host, which is the useful
@@ -212,6 +221,33 @@ CT `800`, the automation user, the pools and the legacy template VMs
 (`9001`–`9004`). Controller creation and the Debian 13 template-volume
 discovery were therefore skipped as already-satisfied rather than exercised.
 Phase 0 is met in substance and its gate stays open.
+
+### `prov0` restore: 2026-08-05, `pve1`
+
+`controller-bootstrap-sdn.yml` run from CT `800` at `031629f`, rebuilding the
+provisioning network after the teardown. Confirmed:
+
+- exactly one VNet, `prov0`, in zone `virtnet`
+- subnet `10.30.0.0/24`, gateway `10.30.0.1`, `snat 1`, DHCP `.100`–`.199` —
+  byte-identical to the pre-teardown capture
+- `prov0` interface up holding `10.30.0.1/24`
+- `dnsmasq@virtnet` active, bound to `10.30.0.1:53` with DHCP on `:67`
+- stock `dnsmasq.service` still `disabled`, so the defect fixed in `25c3a0c`
+  did not return when the zone came back
+- `net.ipv4.ip_forward=1`, persisted in
+  `/etc/sysctl.d/99-cyberlab-forwarding.conf`
+- `vmbr0` and the default route unchanged
+
+**The negative check is the one that matters here** and is easy to skip: zero
+`t101c*` interfaces and zero `vnet0`/`vnet1`. A run that quietly rebuilt the
+classroom topology would otherwise look identical in every positive check
+above. A second run reported `changed=3` — the three known always-changed
+command tasks — and still exactly one VNet.
+
+The gating expressions were checked against both settings before the playbook
+touched the host, confirming `all_vnets` resolves to `[prov0]` with sections
+off and to all five with them on, while `declared_vnets` stays at five either
+way so the name assertions keep covering section VNets.
 
 ---
 

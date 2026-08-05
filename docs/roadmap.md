@@ -99,9 +99,14 @@ a validation that fails. Worth a CI check in Phase 1.
 
 ### Structural gaps
 
-- **There is no SDN on either host.** All of it was deliberately removed on
-  2026-08-05 — see the note below. Per-section VNets and egress control are now
-  Phase 5 work to build from zero rather than existing behaviour to tighten.
+- **`pve1` runs infrastructure SDN only: the zone `virtnet` and `prov0`.**
+  Everything was removed on 2026-08-05 and `prov0` was restored the same day
+  because the template factory cannot work without it — see the two notes
+  below. `pve2` still has no SDN at all.
+- **There are no classroom networks and no egress control.** Per-section VNets
+  are declared in `data/environments/school-lab.yml` but are not built;
+  `cyberlab_sdn_build_sections` defaults to false. Phase 5 builds them from
+  zero rather than tightening existing behaviour.
 - **Phase 0 exit remains unproven.** The fixes are correct by inspection and
   parts of the bootstrap path have now been exercised live (see
   `docs/testing.md`), but the exit criterion itself — two consecutive clean
@@ -146,10 +151,10 @@ carrying into the rebuild. Removal was zero-impact — nothing was attached to
 any VNet. CT `800` is on `vmbr0` and every VM is NIC-less by convention
 (`8ae9823`), so the SDN was serving no guest at the time it was deleted.
 
-**The repo still builds all of it.** `controller-bootstrap-sdn.yml` and the
-section definitions in `data/environments/` are unchanged and a single run
-recreates the whole topology. Treat that playbook as a description of an
-intended design, not of either host's current state.
+**The repo still describes all of it**, but no longer builds it by default —
+see the restore note below. The section definitions in `data/environments/`
+are unchanged and remain a description of an intended design rather than of
+either host's state.
 
 Two things worth knowing before rebuilding SDN:
 
@@ -162,6 +167,39 @@ Two things worth knowing before rebuilding SDN:
 - **The zone cannot be deleted before its VNets**, and a VNet cannot be
   deleted before its subnets. Order is subnets, then VNets, then zone, then
   `pvesh set /cluster/sdn` to apply.
+
+### Restored: `prov0` only, `pve1` (2026-08-05)
+
+Removing all SDN also removed the provisioning network, and that blocked the
+template factory. `prov0` was restored on `pve1` the same day. `pve2` has none
+and needs none — every template sets `target_node: pve1`.
+
+**Why `prov0` is not optional.** The dependency is on its addressing, not just
+its name, so pointing templates at `vmbr0` would not have been a bridge swap:
+
+- `ansible/vars/templates.yml` sets `bridge: prov0` on all five templates.
+- Builds are addressed from its subnet — `bootstrap_ipconfig0` is
+  `ip=10.30.0.10/24,gw=10.30.0.1`, and `nameserver` is `10.30.0.1`, the VNet
+  gateway running dnsmasq.
+- Its subnet is the **only** one with `snat: true`. Section VNets are
+  deliberately `snat: false`, so `prov0` is the sole egress path for the
+  `apt-get` work in `controller-finalize-template-vm.yml`. Commit `5dd0092`
+  exists to make that egress work end to end.
+
+`prov0` is attached transiently and never ships: `controller-promote-template.yml`
+strips every `netN` before `qm template`, and
+`controller-validate-template-clone.yml` re-attaches one on a disposable clone.
+
+**How it is kept minimal.** `controller-bootstrap-sdn.yml` previously
+concatenated infrastructure and section VNets unconditionally, so there was no
+way to have one without the other. `cyberlab_sdn_build_sections` now gates the
+section half and defaults to false (`031629f`). A plain run — including
+`install-cyberlab.sh` with no flags — builds the zone and `prov0` and stops.
+Pass `-e cyberlab_sdn_build_sections=true` for the classroom networks.
+
+The playbook is additive, so turning the flag back off does not remove
+classroom VNets an earlier run created. Tear those down deliberately, in the
+order above.
 
 ---
 
