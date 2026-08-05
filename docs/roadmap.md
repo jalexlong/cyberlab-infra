@@ -235,7 +235,7 @@ block."
 
 | Layer | Component | License | Responsibility |
 |---|---|---|---|
-| Identity | Keycloak or Authentik | Apache 2.0 / MIT | Who is this person |
+| Identity | Guacamole DB auth day one; Keycloak/Authentik later | Apache 2.0 / MIT | Who is this person |
 | Authorization | **Control plane (ours)** | Ours | Policy and quotas |
 | Connection broker | Apache Guacamole | Apache 2.0 | Which consoles are reachable now |
 | Hypervisor | Proxmox VE | AGPLv3 | Runs workloads; one service account |
@@ -247,9 +247,64 @@ Retire for students: `proxmox-users.yml`, `proxmox-pools.yml`,
 `proxmox-acls.yml`, `proxmox-pool-membership.yml`. Keep Proxmox RBAC for the
 teacher/admin account only.
 
-For a fully offline box, consider whether a separate identity provider earns
-its complexity — Guacamole's own database auth may be sufficient at
-single-classroom scale, with an IdP added only if districts require SSO.
+#### Identity provider is deferred, not designed out
+
+Guacamole's OIDC extension provides *authentication only* — it must be layered
+on top of the database auth extension, which is what actually holds users,
+connections, and permissions. The DB extension is required either way, so
+building the control plane against Guacamole's REST API and DB auth now makes a
+later Keycloak addition a drop-in (a JAR in `extensions/` plus config) rather
+than a refactor.
+
+Reasons to hold off at pilot scale: Keycloak is a JVM app wanting ~2 GB, which
+is real money on a 16-32 GB node; and OIDC pushes hard toward HTTPS, colliding
+with the unresolved offline-certificate problem above. For one classroom, 30
+students, and no district SSO requirement, Guacamole's own DB auth is
+sufficient. **Add the IdP when a district requires federation — a selling
+milestone, not a pilot one.**
+
+#### Console delivery
+
+**Not Proxmox's built-in noVNC.** It requires the viewer to *be* a Proxmox user
+with console permission on the specific guest — exactly the per-student ACL
+model retired above — and it drags students into the admin plane. It also
+cannot express "expires in ninety minutes." Guacamole brokers consoles instead,
+so Proxmox sees one service account.
+
+**LXC containers have no framebuffer.** The Proxmox container console is a tty,
+not a desktop. Access path therefore varies by guest type:
+
+| Guest | Path | Cost |
+|---|---|---|
+| LXC, CLI-only lab | SSH — Guacamole speaks it natively | Nearly free |
+| LXC, GUI needed | XFCE + xrdp/VNC server *inside* the container | Erodes the density win |
+| VM | VNC to the QEMU socket, or a server in the guest | Full VM cost |
+
+Most container-suitable labs — recon, networking, log analysis, much of
+Metasploitable3 — are CLI-only, so SSH covers them and renders fine in a
+browser. Reserve desktop-in-container for labs genuinely needing a GUI browser,
+and prefer one shared toolbox container per pod over a desktop in every
+container. Access method tiers alongside the hardware tiers above.
+
+#### Student frontend: stock Guacamole first
+
+Guacamole's own UI already shows a logged-in user exactly the connections they
+have been granted, with thumbnails, and connects on click. That is the
+requirement stated above, natively, with no application to write. It themes
+without code.
+
+Build a custom portal only for what Guacamole has no opinion about — lab
+instructions beside the console, a pod reset button, a countdown, scoring.
+Those are pedagogical features whose shape is unknown until the pilot. At that
+point it is a small app calling the control-plane API and linking out to
+Guacamole per machine, not a rewrite.
+
+**Decision: Phase 6 ships stock Guacamole. Revisit a portal after Phase 8.**
+
+Kasm Workspaces is the obvious-looking alternative and is ruled out: its
+Community Edition caps at 5 concurrent sessions and forbids revenue-generating
+use, failing both the concurrency target and the prebuilt SKU. Guacamole
+(Apache 2.0) carries no such terms.
 
 ### Provisioning tool
 
@@ -416,12 +471,24 @@ internet, not the district LAN, not the Proxmox management network. Prove
 isolation with a test that runs on every deploy. Prove DHCPDISCOVER receives
 DHCPOFFER.
 
+**The access LXC is the one deliberate exception and must be designed as one.**
+Guacamole has to reach every guest to broker consoles, so it holds an interface
+into each pod VNet (or a routed path to it) — tightly scoped, and explicitly
+carved out in the isolation test. Settle this in Phase 5 rather than
+discovering it in Phase 6, or the test gets written and then quietly weakened
+to make consoles work.
+
 ### Phase 6 — Access layer (Jan 2027)
 
-Guacamole LXC, connection provisioning tied to pod lifecycle, session
-recording, idle timeout. **Remote access tunnel as an opt-in module, disabled
-by default** — `cloudflared` outbound-only, zero inbound ports, Cloudflare
-Access in front. Enabled on your own box; shipped off.
+**A single LXC** holding `guacd`, the Tomcat web app, and PostgreSQL together —
+fewer moving parts beats service separation on an offline appliance. Budget
+~2 GB. Connection provisioning tied to pod lifecycle, idle timeout, stock
+Guacamole UI and DB auth per the access-control section above. Session
+recording writes heavily; plan storage before enabling it broadly.
+
+**Remote access tunnel as an opt-in module, disabled by default** —
+`cloudflared` outbound-only, zero inbound ports, Cloudflare Access in front.
+Enabled on your own box; shipped off.
 
 ### Phase 7 — Appliance packaging (Feb-Mar 2027)
 
