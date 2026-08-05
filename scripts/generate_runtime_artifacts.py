@@ -28,16 +28,24 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def read_existing_students(path: Path) -> dict[str, dict[str, Any]]:
+def read_existing_students(path: Path) -> dict[tuple[str, int], dict[str, Any]]:
+    """Key by (section, student_index) rather than username.
+
+    Codenames are now assigned randomly rather than as codenames[idx], so the
+    username can no longer be recomputed and used as a lookup key before the
+    codename is known -- that would be circular. (section, student_index) is
+    the stable identity of a roster slot regardless of what it is named.
+    """
     if not path.exists():
         return {}
     data = load_yaml(path)
     students = data.get("students", [])
-    result: dict[str, dict[str, Any]] = {}
+    result: dict[tuple[str, int], dict[str, Any]] = {}
     for student in students:
-        username = student.get("username")
-        if isinstance(username, str):
-            result[username] = student
+        section = student.get("section")
+        student_index = student.get("student_index")
+        if isinstance(section, str) and isinstance(student_index, int):
+            result[(section, student_index)] = student
     return result
 
 
@@ -71,7 +79,16 @@ def validate_inputs(
     environment_sections: dict[str, Any],
     ) -> None:
     teacher_ids: set[int] = set()
-    section_codes: set[int] = set()
+    # Keyed by teacher_id, not global. vmid_policy and network_policy both
+    # multiply in teacher_id ahead of section_code
+    # (teacher_id * 1000000 + section_code * 1000 + offset), so two teachers
+    # with the same section_code never collide in either VMID or subnet.
+    # section_code today is course/day/block encoded, which is entirely
+    # teacher-independent -- two teachers who both teach, say, Cybersecurity
+    # in A-day block 3 produce the same code -- so a global uniqueness
+    # requirement rejected perfectly valid, non-colliding timetables. This
+    # scopes the check to what the encoding actually needs.
+    section_codes_by_teacher: dict[int, set[int]] = {}
 
     for teacher_key, teacher_data in teachers.items():
         teacher_id = teacher_data.get("teacher_id")
@@ -86,12 +103,18 @@ def validate_inputs(
         if teacher not in teachers:
             raise ValueError(f"Section {section_key} references unknown teacher {teacher}")
 
+        teacher_id = teachers[teacher]["teacher_id"]
+
         section_code = section_data.get("section_code")
         if not isinstance(section_code, int):
             raise ValueError(f"Section {section_key} is missing integer section_code")
-        if section_code in section_codes:
-            raise ValueError(f"Duplicate section_code detected: {section_code}")
-        section_codes.add(section_code)
+        teacher_section_codes = section_codes_by_teacher.setdefault(teacher_id, set())
+        if section_code in teacher_section_codes:
+            raise ValueError(
+                f"Duplicate section_code {section_code} detected for teacher "
+                f"{teacher} (teacher_id {teacher_id})"
+            )
+        teacher_section_codes.add(section_code)
 
         student_count = section_data.get("student_count")
         if not isinstance(student_count, int) or student_count < 0:
@@ -109,8 +132,16 @@ def build_runtime_artifacts(
         sections_data: dict[str, Any],
         policy_data: dict[str, Any],
         environment_data: dict[str, Any],
-        existing_students: dict[str, dict[str, Any]],
+        existing_students: dict[tuple[str, int], dict[str, Any]],
+        rng: random.Random | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    # A real random source by default, not one seeded from teacher_id or
+    # section_code -- both are stored in this git repository, so a seed built
+    # from them would be exactly as guessable as the codename or password it
+    # produces. Tests inject a seeded random.Random for reproducibility; that
+    # is the only place determinism belongs.
+    if rng is None:
+        rng = random.SystemRandom()
     teachers = teachers_data["teachers"]
     sections = sections_data["sections"]
     env_sections = environment_data["environment"]["sections"]
@@ -129,6 +160,8 @@ def build_runtime_artifacts(
         "badger", "lumen", "atlas", "echo", "pine", "nova", "cinder", "glade",
         "thunder", "quartz", "aurora", "river", "apex", "moss", "forge", "drift",
         "hawk", "sable", "summit", "onyx", "spruce", "dawn", "solace", "flux",
+        "willow", "granite", "meadow", "orbit", "canyon", "frost", "juniper", "tide",
+        "boulder", "ridge", "lantern", "brook", "cascade", "prairie", "beacon", "vale",
     ]
     pass_words_1 = [
         "maple", "tiger", "river", "silver", "ember", "forest", "copper", "ocean",
@@ -157,19 +190,58 @@ def build_runtime_artifacts(
         student_count = int(section["student_count"])
         teacher = str(section["teacher"])
 
-        teacher_record = teachers.get(teacher, {})
-        teacher_id = int(teacher_record["teacher_id"])
-        section_code = int(section["section_code"])
-
         if student_count > len(codenames):
             raise ValueError(
                 f"Section {section_key} needs {student_count} students but only "
                 f"{len(codenames)} codenames are available"
             )
 
+        # Reuse codenames already assigned to this section's existing
+        # students, and draw fresh ones -- uniformly at random, without
+        # replacement -- only for roster slots that don't have a persisted
+        # assignment yet. This is what makes regeneration idempotent: once a
+        # slip has been printed and handed out, re-running this script must
+        # never change that student's username out from under them.
+        #
+        # Randomising rather than using codenames[idx] positionally is the
+        # actual fix. Positional assignment meant every section started
+        # "raven, otter, maple..." in the same order, so anyone who could
+        # guess the roster order a class list follows (alphabetical is the
+        # obvious default) could reconstruct which pseudonym belonged to
+        # which position with no real leak required.
+        existing_for_section = {
+            idx: existing_students.get((section_key, idx))
+            for idx in range(student_count)
+        }
+        reserved_codenames = {
+            record["codename"]
+            for record in existing_for_section.values()
+            if record and "codename" in record
+        }
+        needing_codename = [
+            idx
+            for idx in range(student_count)
+            if not (existing_for_section[idx] and "codename" in existing_for_section[idx])
+        ]
+        available_codenames = [c for c in codenames if c not in reserved_codenames]
+        if len(needing_codename) > len(available_codenames):
+            raise ValueError(
+                f"Section {section_key} needs {len(needing_codename)} new codenames "
+                f"but only {len(available_codenames)} remain unreserved in the pool"
+            )
+        freshly_drawn = dict(
+            zip(needing_codename, rng.sample(available_codenames, k=len(needing_codename)))
+        )
+
         for idx in range(student_count):
             ordinal = idx + 1
-            codename = codenames[idx]
+            existing = existing_for_section[idx]
+
+            if existing and "codename" in existing:
+                codename = str(existing["codename"])
+            else:
+                codename = freshly_drawn[idx]
+
             username = format_student_username(
                 display_section, codename, ordinal, username_format
             )
@@ -178,20 +250,18 @@ def build_runtime_artifacts(
                 raise ValueError(f"Duplicate generated username detected: {username}")
             used_usernames.add(username)
 
-            existing = existing_students.get(username)
             if existing and "initial_password" in existing:
                 initial_password = str(existing["initial_password"])
             else:
                 if password_mode != "runtime_generated":
                     raise ValueError(f"Unsupported password mode: {password_mode}")
-                seed = f"{teacher_id}-{section_code}-{idx}"
-                rng = random.Random(seed)
                 initial_password = generate_password(rng, pass_words_1, pass_words_2)
 
             proxmox_pool = student_pool_format.replace("<username>", username)
 
             record = {
                 "username": username,
+                "codename": codename,
                 "section": section_key,
                 "student_index": idx,
                 "proxmox_pool": proxmox_pool,

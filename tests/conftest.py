@@ -8,6 +8,7 @@ were all discoverable without hardware and none of them were caught by
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -18,6 +19,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ANSIBLE_DIR = REPO_ROOT / "ansible"
 PLAYBOOK_DIR = ANSIBLE_DIR / "playbooks"
 INVENTORY = ANSIBLE_DIR / "inventory.yml"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+
+# scripts/ is not a package; this is what lets a test import
+# generate_runtime_artifacts.py directly to exercise its behaviour, rather
+# than only grepping its source text as test_phase0_regressions.py does.
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 PLAYBOOKS = sorted(PLAYBOOK_DIR.glob("*.yml"))
 
