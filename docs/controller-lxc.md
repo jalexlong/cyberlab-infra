@@ -117,7 +117,7 @@ The controller is not a classroom payload image. It is an automation appliance.
 The controller LXC should live on the **management network**, not on a classroom VNet.
 
 It should attach to:
-- `vmbr0` or the environmentâ€™s designated management bridge
+- `vmbr0` or the environment's designated management bridge
 
 It should **not** attach to:
 - section VNets

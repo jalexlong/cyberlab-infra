@@ -78,9 +78,18 @@ Template clone-default networking should return to DHCP before promotion.
 - promote validated base templates
 - generate pseudonymous student identities at runtime
 - provision student and teacher VMs from golden templates
-- assign Proxmox users, groups, pools, and ACLs from code
 - isolate sections cleanly
 - keep operations simple enough for one teacher to run reliably
+
+> **Superseded:** "assign Proxmox users, groups, pools, and ACLs from code" was
+> a phase-one goal and is no longer the direction. Per-student Proxmox
+> identities cannot express concurrency limits, expiry, or class-period
+> scoping. Student access now goes through a control plane and Apache
+> Guacamole, with Proxmox holding a single service account. See the access
+> control section of [docs/roadmap.md](docs/roadmap.md). The
+> `proxmox-users.yml` / `proxmox-pools.yml` / `proxmox-acls.yml` /
+> `proxmox-pool-membership.yml` playbooks are retained for the teacher/admin
+> account only.
 
 ## Template catalog
 
@@ -93,8 +102,19 @@ Current assigned/reserved template IDs:
 - `900`: `tpl-debian13-base`
 - `901`: `tpl-ubuntu2604-base`
 - `902`: `tpl-parrot-base`
-- `903`: `tpl-win7-base`
-- `904`: `tpl-metasploitable2-base`
+- `903`: `tpl-win7-base` — **cannot ship**, see below
+- `904`: `tpl-metasploitable2-base` — **to be replaced**, see below
+
+Windows 7 is non-redistributable and out of support; Metasploitable 2's
+redistribution terms are ambiguous. Both are `enabled: false` today, so
+nothing is blocked, but neither can appear in a prebuilt unit. The plan is to
+drop Windows 7, move to Metasploitable 3 (BSD-3-Clause), and add OWASP Juice
+Shop (MIT). See the content licensing table in
+[docs/roadmap.md](docs/roadmap.md).
+
+Note that `data/slots.yml` still names `win7-template` and
+`metasploitable2-template`, so removing them from the catalog forces a slots
+change. `tests/` enforces that the two files agree.
 
 Current validation clone IDs:
 
@@ -126,11 +146,19 @@ ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.y
 ```text
 cyberlab-infra/
 ├── README.md
+├── pyproject.toml              # ruff + pytest config
+├── requirements-dev.txt        # lint/test tooling
+├── .yamllint / .ansible-lint   # linter config
+├── .github/
+│   └── workflows/ci.yml
 ├── docs/
+│   ├── roadmap.md              # architecture decisions and phases
+│   ├── bootstrap-checklist.md
+│   ├── controller-lxc.md
 │   ├── data-model.md
 │   ├── platform-pipeline.md
-│   └── template-lifecycle.md
 │   ├── recovery.md
+│   ├── template-lifecycle.md
 │   └── testing.md
 ├── data/
 │   ├── bootstrap-policy.yml
@@ -142,19 +170,23 @@ cyberlab-infra/
 │       ├── demo-lab.yml
 │       └── school-lab.yml
 ├── ansible/
+│   ├── ansible.cfg
+│   ├── requirements.yml        # community.proxmox collection
 │   ├── inventory.yml
+│   ├── group_vars/
 │   ├── playbooks/
 │   └── vars/
 │       └── templates.yml
 ├── scripts/
-├── private/
-│   ├── credentials/
-│   ├── exports/
-│   ├── generated/
-│   ├── local/
-│   ├── secrets/
-│   └── .gitignore
-└── opentofu/
+│   ├── install-cyberlab.sh
+│   ├── bootstrap-controller.sh
+│   ├── capture-host-state.sh   # read-only pre-teardown capture
+│   ├── detect-controller-network.sh
+│   ├── promote-template.sh
+│   └── generate_runtime_artifacts.py
+├── tests/                      # repository invariants; no Proxmox needed
+├── private/                    # never committed; see Secrets hygiene
+└── opentofu/                   # currently empty; see roadmap decision
 ```
 
 ## Source-of-truth files
@@ -365,16 +397,29 @@ The current working milestone proves:
 - SDN bootstrap
 - provisioning VNet creation
 - Debian 13 template promotion
+- template clone validation (clone, boot, guest agent, reachability, cleanup)
+
+CI runs `yamllint`, `ansible-lint`, `ruff`, `shellcheck`, and `pytest` on every
+push and pull request. `tests/` reads the repository as data and needs no
+Proxmox host. See [docs/testing.md](docs/testing.md) to run the same checks
+locally.
 
 ## Next milestones
 
-- add validation clone automation
-- expand template support beyond Debian 13
-- refactor OpenTofu to consume the current model
-- refactor Ansible to consume generated runtime student artifacts
-- add snapshot and rollback controls
-- validate student and teacher access flows end to end
-- test validation clone automation on live Proxmox hardware
+Planning, architecture decisions, and the phase plan live in
+[docs/roadmap.md](docs/roadmap.md), which is the authoritative forward-looking
+document. In short:
+
+- **Blocked on hardware:** two clean `install-cyberlab.sh` runs on a wiped host
+  to close Phase 0; measure real per-VM and per-LXC RAM. The roadmap's
+  hardware-gated backlog collects everything needing a lab session.
+- **Next on a laptop:** drop the non-shippable images and right-size
+  `data/slots.yml`; formalize the factory/site split so nothing at a deployment
+  site needs the internet; design the pod provisioning engine.
+- **Direction changes worth knowing:** student access moves to a control plane
+  plus Guacamole rather than per-student Proxmox identities; OpenTofu is not
+  the right tool for pods created and destroyed many times a day and may be
+  dropped entirely.
 
 ## Notes for future me
 

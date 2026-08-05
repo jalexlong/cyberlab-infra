@@ -76,15 +76,27 @@ Options:
 
 | Flag | Effect | When |
 |---|---|---|
-| *(none)* | Config and facts only. Small and fast. | The normal case for a disposable host |
+| *(none)* | Config, facts, and `/etc/pve/priv/`. Small and fast. | The normal case for a development host |
 | `--with-guests` | Also `vzdump` every VM and container | Only if a specific guest is worth keeping |
-| `--with-secrets` | Also copy `/etc/pve/priv/` | Rarely. See below |
+| `--no-secrets` | Skip `/etc/pve/priv/` | A district deployment, or any destination you do not control |
 
-`/etc/pve/priv/` is **excluded by default**. It holds API token secrets and
-cluster keys, the rebuild regenerates all of it, and the usual destination for
-this capture is a USB stick that then lives in a drawer. Per the secrets
-hygiene section of the README, any previously exposed token should be treated
-as compromised and rotated rather than restored.
+`/etc/pve/priv/` — API token secrets and cluster keys — **is captured by
+default**, so that restoring the capture yields a working environment rather
+than one you are locked out of. That is the right default for a development
+host, where the cost of being unable to revert is higher than the cost of keys
+sitting on a stick in a drawer.
+
+Two consequences worth being deliberate about:
+
+- **If you ever actually restore from a capture, rotate the credentials
+  afterwards.** The README's secrets hygiene section applies from that point
+  on; a restored token has been off-host and should be treated accordingly.
+- **The USB stick is now credential-bearing.** Store it like a key, not like a
+  scratch disk.
+
+For a host whose keys should not leave it, pass `--no-secrets`. The rebuild
+regenerates everything in `priv/` regardless, so excluding it costs only the
+ability to revert.
 
 ## Verify the capture before wiping anything
 

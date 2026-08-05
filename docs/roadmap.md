@@ -152,8 +152,11 @@ Two cautions survive the pivot:
 
 - **Capture before wiping, and verify the capture from a second machine.** The
   facts are cheap to save and expensive to rediscover.
-- **Rotate rather than restore any credential.** Nothing in `/etc/pve/priv/`
-  should come back; the rebuild regenerates it.
+- **The capture includes `/etc/pve/priv/` by default**, so that a restore
+  yields a working environment rather than a locked-out one — the right
+  trade for a development host. It makes the destination credential-bearing,
+  and it means rotating credentials *after* any actual restore. A district
+  deployment should use `--no-secrets` instead.
 
 Suggested order for the first session after the wipe: capture and verify, then
 wipe, then the Phase 0 run twice — because a clean install on a genuinely

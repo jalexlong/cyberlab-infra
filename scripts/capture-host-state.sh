@@ -16,10 +16,16 @@
 # large. For a disposable proto-prototype host the configuration and the facts
 # are usually all that is worth keeping.
 #
-# Secrets: /etc/pve/priv/ holds API token secrets and cluster keys. It is
-# EXCLUDED by default, because a rebuild regenerates all of it and because the
-# usual destination for this capture is a USB stick. Pass --with-secrets only
-# if you have a specific reason, and treat the destination accordingly.
+# Secrets: /etc/pve/priv/ holds API token secrets and cluster keys. These ARE
+# captured by default, so that restoring the capture yields a working
+# environment rather than one you are locked out of. That is the right default
+# for a development host. If you ever actually restore from this capture,
+# rotate the credentials afterwards.
+#
+# Pass --no-secrets for a host whose keys should not leave it — a district
+# deployment, or any capture whose destination you do not control. The rebuild
+# regenerates everything in priv/ regardless, so excluding it only costs you
+# the ability to revert.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -31,7 +37,7 @@ readonly SCRIPT_NAME
 
 DEST=""
 WITH_GUESTS=0
-WITH_SECRETS=0
+WITH_SECRETS=1
 
 usage() {
   cat <<EOF
@@ -44,7 +50,9 @@ Required:
 
 Options:
   --with-guests       Also vzdump every VM and container. Slow and large.
-  --with-secrets      Also copy /etc/pve/priv/. Off by default; see header.
+  --no-secrets        Skip /etc/pve/priv/. Captured by default so a restore
+                      yields a working environment; see header.
+  --with-secrets      Explicitly keep the default. Accepted for clarity.
   -h, --help          Show this help.
 
 Example:
@@ -78,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with-secrets)
       WITH_SECRETS=1
+      shift
+      ;;
+    --no-secrets)
+      WITH_SECRETS=0
       shift
       ;;
     -h | --help)
@@ -186,7 +198,8 @@ log "Copying configuration"
 if [[ -d /etc/pve ]]; then
   mkdir -p "${DEST}/config/pve"
   if [[ "${WITH_SECRETS}" -eq 1 ]]; then
-    warn "Including /etc/pve/priv — the destination now holds secret material."
+    warn "Including /etc/pve/priv — ${DEST} now holds keys and token secrets."
+    warn "Store it accordingly, and rotate credentials if you ever restore it."
     cp -a /etc/pve/. "${DEST}/config/pve/" 2>/dev/null || warn "  partial /etc/pve copy"
   else
     # Everything except priv/, which the rebuild regenerates anyway.
