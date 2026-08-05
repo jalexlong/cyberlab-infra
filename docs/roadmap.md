@@ -174,6 +174,13 @@ either host's state.
 
 Two things worth knowing before rebuilding SDN:
 
+- **SNAT rules accumulate across runs rather than reconciling.** On `pve1`,
+  `iptables-save -t nat` shows the `10.30.0.0/24 -> vmbr0` masquerade repeated
+  five times, plus a stale rule for `10.0.12.0/24`, a subnet the SDN no longer
+  defines. Applying SDN appends; nothing prunes. The playbook reports itself
+  converged while the ruleset grows, which is the same shape of problem as the
+  IPAM staleness below — Proxmox SDN state outliving what it describes. Worth
+  fixing in the rebuild rather than carrying forward.
 - **Subnet deletion is blocked by IPAM allocations.** On `pve2` the delete
   failed with `cannot delete subnet '10.30.0.0/24', not empty` until the
   entries were released with `pvesh delete /cluster/sdn/vnets/<vnet>/ips`. The
@@ -1196,13 +1203,28 @@ Actual internet access is still unlikely, since a lab-sourced packet matches
 no SNAT rule and gets no return path — so "no egress" is accidentally true for
 the internet and accidentally false for everything local.
 
-**Epistemic status: reasoned from the configuration, not observed.** Section
-VNets exist on no host right now, so this could not be tested from this
-session. Confirm before designing around it — build one section VNet, attach a
-guest, and from it try (a) `ping` the management IP, (b) reach a guest in
-another section, (c) reach `10.30.0.1`. If those succeed, isolation is a
-firewall project, not an SDN-flag project, and every design below depends on
-it.
+**Partially confirmed on `pve1`, 2026-08-05.** The preconditions are all
+verified present; the consequence is not yet demonstrated:
+
+- `net.ipv4.ip_forward = 1` — confirmed.
+- The host holds `10.30.0.1/24` on `prov0` — confirmed.
+- **The datacenter firewall is disabled.** `cluster.fw` carries `enable: 0`
+  and `pve-firewall status` reports `disabled/running`, so nothing is
+  filtering anything. There is even a `500.fw` with `enable: 1` on it that
+  does nothing, because guest rules do not apply while the datacenter firewall
+  is off — a good illustration of why the `firewall=1` flag needs asserting
+  rather than trusting.
+
+What remains untested is only the last step: whether a lab guest can therefore
+reach the management address. Section VNets exist on no host, so there was
+nothing to test *from*. Build one section VNet, attach a guest, and from it try
+(a) `ping` the management IP, (b) reach a guest in another section, (c) reach
+`10.30.0.1`. Given a forwarding host with an address on every subnet and no
+filter, expect all three to succeed — which makes isolation a firewall project,
+not an SDN-flag project.
+
+See `docs/network-isolation.md` for the full measured baseline, including the
+correction that the school network is a `/23` rather than a `/24`.
 
 #### Isolation enforcement — decided: Proxmox firewall, not a firewall VM
 

@@ -3,9 +3,66 @@
 How the appliance stays silent on a school network.
 
 **Written:** 2026-08-05
-**Status:** design. Nothing here is implemented or verified on hardware yet.
+**Status:** design. Nothing here is implemented; the *baseline* below was
+measured on `pve1` 2026-08-05, the design was not.
 **Related:** `docs/roadmap.md` Phase 5 (isolation), Phase 2.5 (package cache),
 Phase 7 (site survey).
+
+---
+
+## Measured baseline — `pve1`, 2026-08-05
+
+Read off the live host rather than assumed. Several of this document's first-
+draft assumptions were wrong, and are corrected throughout.
+
+| Fact | Value |
+|---|---|
+| Proxmox VE | **9.2.9** (`proxmox-ve 9.2.0`), Debian 13 trixie, kernel 6.17.13-4-pve |
+| Firewall packages | `pve-firewall 6.0.5` (legacy) and `proxmox-firewall 1.2.3` (nftables), **both services enabled and active** |
+| Active backend | **Neither is producing rules.** `nft list tables` is empty and no `nftables: 1` opt-in exists in `/etc/pve` |
+| Datacenter firewall | **`enable: 0` in `cluster.fw` — disabled.** Per-guest configs exist and are inert because of it |
+| School network | **`10.64.62.0/23`**, not a `/24`. `vmbr0` is `10.64.62.200/23` |
+| `net.ipv4.ip_forward` | `1` |
+| Bridge STP | `0` (off) on `vmbr0` and `prov0` |
+| `avahi-daemon` | **Not installed** — only `libavahi-*` client libraries |
+| Time sync | `chrony` **active and syncing to the public pool** |
+
+### What this changes
+
+- **The firewall being disabled is the headline.** `pve-firewall status`
+  reports `disabled/running`. There is a `500.fw` with `enable: 1` on it, and
+  it does nothing, because guest rules do not apply while the datacenter
+  firewall is off. This is the empirical half of the `snat: false` suspicion
+  in Phase 5: forwarding is on, the host holds a gateway on every VNet subnet,
+  and **nothing is filtering**. The remaining unknown is only whether lab
+  guests can therefore reach the management address, which still needs a
+  section VNet and a guest to test.
+- **`chrony` is a live, continuous egress path right now.** It is reaching
+  `2.debian.pool.ntp.org` with four sources at full reachability. Item 2 in the
+  ranking below is not hypothetical on this host; it is happening.
+- **mDNS drops off the list.** `avahi-daemon` is not installed, only its
+  client libraries, so there is nothing emitting mDNS.
+- **BPDU risk is confirmed low.** STP is off on both bridges, as predicted.
+- **Every subnet mask in this document was wrong.** The school network is a
+  `/23`. Rules below use `10.64.62.0/23`.
+
+### Stale state to clear before the rebuild
+
+Found incidentally and worth removing rather than carrying forward, consistent
+with the roadmap's position that the current host is a disposable
+proto-prototype:
+
+- `/etc/pve/firewall/500.fw` — VM `500` is the decommissioned
+  `farmcardscode.org` host.
+- `/etc/pve/firewall/9004.fw` — a template VMID.
+- `cluster.fw` aliases `lab-net1 10.0.2.0/24` and `prod-net 10.0.1.0/24`,
+  neither of which exists in the current design.
+- **Duplicate SNAT rules.** `iptables-save -t nat` shows the
+  `10.30.0.0/24 -> vmbr0` masquerade repeated five times, alongside a stale
+  `10.0.12.0/24` rule for a subnet the SDN no longer defines. **The SDN apply
+  path appends rather than reconciles**, so rules accumulate across runs. Worth
+  a check in the rebuild — an idempotent playbook that leaves a growing
+  ruleset behind is not idempotent where it counts.
 
 ---
 
@@ -31,12 +88,12 @@ exotic failures and away from the ones that will actually happen by default.
 | # | Leak | Likelihood | Consequence |
 |---|---|---|---|
 | 1 | **Lab guest traffic escaping** | **High** — depends on firewall rules being right, and `snat: false` is already suspected insufficient (roadmap, Phase 5) | Looks exactly like an internal attacker. `nmap` from a student VM is indistinguishable from a real compromise |
-| 2 | **Phone-home** — subscription checks, `apt` timers, NTP pools | **High** — on by default; happens unless explicitly suppressed | Unexplained outbound to the internet from a box sold as air-gapped. Erodes the central product claim |
-| 3 | **Corosync heartbeat on the uplink** | **Moderate** — only if the cluster network is not physically separated | Constant unexplained UDP between unknown hosts, every few hundred ms, forever |
-| 4 | **mDNS / LLMNR / NetBIOS broadcast** | **Moderate** — if `avahi-daemon` is installed | Noise; clutters discovery tooling |
-| 5 | **Stray ICMP** | Moderate | Mostly harmless, trivially avoidable |
+| 2 | **Phone-home** — subscription checks, `apt` timers, NTP pools | **Confirmed happening** — `chrony` on `pve1` is syncing to `2.debian.pool.ntp.org` right now, four sources at full reach | Unexplained outbound to the internet from a box sold as air-gapped. Erodes the central product claim |
+| 3 | **Corosync heartbeat on the uplink** | **Moderate** — only if the cluster network is not physically separated. Not yet live; the hosts are not clustered | Constant unexplained UDP between unknown hosts, every few hundred ms, forever |
+| 4 | **Stray ICMP** | Moderate | Mostly harmless, trivially avoidable |
+| 5 | **mDNS / LLMNR / NetBIOS broadcast** | **Low on the host** — `avahi-daemon` is not installed on `pve1`, only client libraries. Remains a guest-side concern for Windows VMs | Noise; clutters discovery tooling |
 | 6 | **Rogue DHCP** — SDN `dnsmasq` answering on the uplink | **Low** — requires a VNet deliberately bridged to a physical NIC | School devices take `10.30.0.x` leases and lose network. Ejection from the district network |
-| 7 | **BPDUs from a Linux bridge** | **Low** — Proxmox generates `bridge_stp off` | BPDU guard err-disables the switch port. Visible outage, and the logs name us |
+| 7 | **BPDUs from a Linux bridge** | **Low, confirmed** — `stp_state` is `0` on both `vmbr0` and `prov0` | BPDU guard err-disables the switch port. Visible outage, and the logs name us |
 
 Items 6 and 7 stay on the list despite low likelihood because both are cheap to
 assert against and expensive to discover. That is a different argument from
@@ -248,10 +305,21 @@ to *test against*, and the verification section below is how.
 Proxmox firewall, per the Phase 5 decision. Enforced at each guest's
 tap/veth and at the host, so it does not depend on routing topology.
 
-> **Syntax caveat.** The blocks below are the intended *shape*. PVE 8.2 moved
-> the firewall to an nftables backend and added host `FORWARD` rules, so exact
-> directives must be checked against the installed version's documentation
-> when this is implemented. Do not paste these in unverified.
+> **Syntax caveat, narrowed by the baseline above.** `pve1` runs PVE 9.2.9
+> with both firewall backends installed but **neither producing rules**, and
+> no `nftables: 1` opt-in. So the backend this design lands on is still an open
+> choice, not a given:
+>
+> - **Legacy `pve-firewall`** is what the `.fw` syntax below targets and is the
+>   safer default today.
+> - **`proxmox-firewall`** (nftables) is the direction Proxmox is moving and
+>   handles host `FORWARD` rules more coherently, which matters here because
+>   inter-VNet traffic is forwarded, not local.
+>
+> Decide deliberately during Phase 5 and record it. Either way the `.fw` files
+> are the interface — the nftables backend consumes the same configuration —
+> so the rule *shape* below survives the choice. Verify exact directives
+> against PVE 9.2 documentation before pasting.
 
 ### `cluster.fw`
 
@@ -263,7 +331,7 @@ policy_out: DROP
 
 [ALIASES]
 uplink_gw      10.64.62.1
-mgmt_net       10.64.62.0/24
+mgmt_net       10.64.62.0/23
 cluster_net    10.32.0.0/24
 svc_net        10.31.0.0/24
 prov_net       10.30.0.0/24
@@ -382,14 +450,17 @@ Service suppression:
 ```
 systemctl disable --now pve-daily-update.timer
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
-systemctl disable --now systemd-timesyncd     # if chrony is the time source
-apt-get purge avahi-daemon                    # purge, not disable
+# systemd-timesyncd is already inactive on pve1; chrony is the time source
+# avahi-daemon is not installed on pve1 -- verify before assuming on a new host
 ```
 
-Time, per the roadmap's offline-NTP note: one node is the cluster time source,
-running `local stratum 10` with **no upstream pool or server directives** at
-site, peering only across `vmbr1`. Without this every node quietly tries to
-reach `*.pool.ntp.org` forever.
+**Time is the live one.** `chrony` on `pve1` currently carries
+`pool 2.debian.pool.ntp.org iburst` and is actively synchronising to four
+public servers. At site that must become: one node designated as the cluster
+time source, running `local stratum 10` with **no `pool` or `server`
+directives at all**, and every other node peering to it across `vmbr1`. Until
+that change, each node independently reaches the public internet on UDP 123
+for as long as it is powered on.
 
 ---
 
