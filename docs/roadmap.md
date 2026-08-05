@@ -23,6 +23,12 @@ courses rather than a generic set.
 nodes in a rolling rack that a school district can deploy into a classroom and
 run a cyber range on, with no dependence on district network services.
 
+**"No dependence" is meant literally, and the factory-seeded package cache is
+what makes it true** (Phase 2.5). An air-gapped unit can still install software
+into lab guests, so the district provides one inbound-reachable IP address and
+nothing else — no egress, DNS, NTP, or wireless. Most of the design decisions
+below are downstream of taking that sentence seriously.
+
 Two delivery paths:
 
 | SKU | What ships | Licensing position |
@@ -252,6 +258,13 @@ fresh host is the thing every other item depends on. The lint retirements are
 good work to do *between* the two install runs, since re-running the installer
 is the verification they need anyway.
 
+**The package cache (Phase 2.5) is the exception to that ordering.** Build and
+seed it *before* the wipe, then let the rebuild re-create it — that turns the
+wipe into the proof that the cache is reproducible from `install-cyberlab.sh`
+rather than a hand-built artifact that merely exists. Nothing is lost by
+wiping a seeded cache while the classroom still has egress; the one-way door
+is air-gapping, not wiping.
+
 | Item | Why it needs hardware | Where |
 |---|---|---|
 | Capture the existing host, verify the capture elsewhere, then wipe | The facts are cheap to save and expensive to rediscover | Phase 0-minus |
@@ -263,6 +276,7 @@ is the verification they need anyway.
 | Measure real per-VM and per-LXC RAM | Every sizing number in this document is an estimate | Phase 3 |
 | Right-size `slots.yml` from those measurements | See the RAM budget section — currently ~22.5 GB/student | Phase 3/4 |
 | Validate the template pipeline end to end offline | prepare → finalize → promote → validate, plus a deliberately broken image failing the gate | Phase 2 |
+| Build and seed the `apt-cacher-ng` LXCs, then install a package with the uplink unplugged | Needs a real host, a real template build to warm it, and a cable to physically pull — none of which exist on a laptop | Phase 2.5 |
 | Noise under load, power draw on one circuit, thermals | Product requirements, not nice-to-haves | Phase 3 |
 
 Laptop-doable items that came out of the same work, for contrast: the
@@ -899,6 +913,119 @@ image can no longer be produced in the first place.
   `cloud_image` build.
 - **Juice Shop and Metasploitable3** are not in the catalog yet.
 
+### Phase 2.5 — Package cache, before the air gap (Oct-Nov 2026)
+
+**Promoted to a phase of its own, and sequenced here deliberately.** The cache
+is not a convenience bolted onto an offline appliance — it is what lets an
+air-gapped lab still install software. The observed positioning claim is that
+comparable classroom ranges tend to fall on one side or the other: either they
+need internet, or they ship sealed images with no package installation at all.
+Treated here as a differentiator worth building deliberately rather than an
+audited survey of the market — worth confirming against specific competitors
+before it goes in any sales material.
+
+**It is also a one-way door, which is the real reason it comes now.** A cache
+can only be seeded while the lab still has egress. Once a unit is air-gapped —
+or once this classroom's own build goes offline — there is no path to fill it.
+Every other phase can be reordered; this one cannot be done late. Numbered 2.5
+rather than inserted as a new Phase 3 so the existing phase numbers, which the
+rest of this document references throughout, keep meaning what they mean.
+
+**Depends on** Phase 2's Debian 13 pipeline being green, which it is, because
+the template finalize pass is what does the seeding.
+
+#### Placement: one LXC per node, on a service VNet
+
+Not one shared service for the cluster. Pod affinity puts pod networks in
+node-local `simple` zones — the existing hosts already prove this, each having
+carried its own independent `virtnet` — so a cache container on node 1 has no
+path to a pod VNet on node 2. A cache per node keeps every packet node-local,
+costs only disk, and matches the decision already accepted for templates
+("replicated to every node's local storage").
+
+Three alternatives, and why not:
+
+- **One interface per pod VNet on a single container.** Strongest isolation
+  story — link-local, no routing permitted at all — but Proxmox caps an LXC at
+  ten NICs and Phase 5 wants a VNet *per pod*. Dead at roughly nine students.
+- **Put the cache on `prov0`.** Tempting, since `prov0` is the one subnet with
+  `snat: true` and already has egress. Rejected on architecture: `prov0` is
+  factory-time infrastructure, stripped from every shipped unit, and the
+  factory/site split is the defining split of this design. A site-time service
+  must not live on a factory-time network.
+- **Run `apt-cacher-ng` on the Proxmox host directly.** No container, no VMID,
+  no cross-node problem, bound to each VNet gateway. Rejected on blast radius:
+  this is a lab where students practice exploitation by design, and a service
+  reachable from lab networks must not run on the hypervisor.
+
+**The container is dual-homed, and that is how the air gap gets crossed
+exactly once.** `net0` on the service VNet is permanent and carries no egress;
+`net1` on `prov0` exists only during factory seeding and is stripped before
+the unit ships. This mirrors the pattern the template pipeline already uses and
+documents — `prov0` attached transiently, removed by
+`controller-promote-template.yml` before `qm template` — so it is an
+established idiom here rather than a new one.
+
+#### Work items
+
+- **Define a `svc0` VNet** alongside `prov0` in `ansible/inventory.yml`:
+  `snat: false`, four characters so it clears the Proxmox 8-character limit.
+  **Watch the subnet collision.** `prov0` holds `10.30.0.0/24` and section
+  subnets are built as `10.<teacher_id>.<section_code>.0/24`, so a service
+  network at `10.31.0.0/24` collides with `teacher_id: 31`. Reserve both
+  `10.30` and `10.31` as infrastructure and assert that no `teacher_id` may
+  take those values — the kind of latent collision this document has already
+  been bitten by once in the identifier scheme.
+- **A `controller-bootstrap-package-cache.yml` playbook**, and its call in
+  `install-cyberlab.sh` behind a flag defaulting the same way
+  `cyberlab_sdn_build_sections` does — off until it is proven.
+- **Size it.** 512 MB RAM is ample for `apt-cacher-ng`; the disk is the real
+  cost, plausibly 10-20 GB per node, times node count, since each node carries
+  its own. Cheap on local NVMe, but not free, and BOM v1 should know before
+  Phase 3 prices drives.
+- **Explicit proxy, not transparent.** Bake
+  `Acquire::http::Proxy "http://<node-cache>:3142";` into template images
+  rather than intercepting port 80 with DNAT. Declarative, visible in the
+  image, and it **fails closed** — an unreachable cache makes `apt` error
+  rather than quietly trying to reach the internet. It also removes the DNS
+  dependency from lab guests entirely, since the proxy resolves upstream names
+  on their behalf.
+- **Seed via the finalize pass.** `controller-finalize-template-vm.yml`
+  already runs `apt-get` over `prov0`'s SNAT; pointing it at the cache means
+  the cache warms with exactly the package set the shipped labs install, with
+  no separate manifest to maintain and drift.
+- **Supplement with a small explicit manifest** in `data/` for packages labs
+  install at *run* time but templates do not bake. Those never pass through
+  the factory, so they never warm the cache on their own.
+- **Pin retention.** `apt-cacher-ng` expires unreferenced files by default. On
+  an offline appliance that slowly empties a cache nothing can refill, and it
+  fails months after deployment, in someone else's classroom, looking like
+  corruption rather than configuration.
+
+#### Exit
+
+- The cache LXC is reproducible from `install-cyberlab.sh` on a clean host.
+- A template build's `apt` traffic demonstrably passes *through* the cache —
+  verified from the cache's own hit/miss counters, not from the build merely
+  succeeding, which it would do either way.
+- **A lab guest completes `apt-get update` and an install with the host's
+  uplink physically unplugged.** Pulling the cable is the only version of this
+  test that cannot pass for the wrong reason; a wrong rule or a stale route
+  can still resolve and still fetch.
+- Cache contents survive a reboot of the container and its host.
+
+**What this reduces the district ask to.** With the cache seeded and the
+firewall enforcing isolation, the appliance needs exactly one thing from a
+district: **an inbound-reachable IP address.** No egress, no DNS, no NTP, no
+access point, no outbound firewall exceptions. That is the smallest ask this
+product can make, it is the same ask in a classroom or a central rack, and it
+shortens the Phase 7 site survey to port security, IP assignment, and physical
+location.
+
+**VMID note:** `data/bootstrap-policy.yml` and `docs/platform-pipeline.md`
+reserve `801-805`, one per node, since VMIDs are cluster-unique and a per-node
+service cannot share one ID.
+
 ### Phase 3 — Hardware and BOM (Oct-Nov 2026)
 
 Acquire and validate the cluster. Measure real per-VM RAM. Verify noise under
@@ -1107,75 +1234,9 @@ Rule shape, stateful so return traffic needs no rule of its own:
 
 #### Package cache — the second deliberate carve-out
 
-Fills the VMID reservation for a "future apt-cache or package mirror service"
-and delivers `apt install` inside lab networks without giving them reach. See
-the student-network section for the intent.
-
-**Placement: one LXC per node, on a per-node service VNet.** Not one shared
-service for the cluster. Pod affinity puts pod networks in node-local `simple`
-zones — the existing hosts already prove this, each having carried its own
-independent `virtnet` — so a cache container on node 1 has no path to a pod
-VNet on node 2. A cache per node keeps every packet node-local, costs only
-disk, and matches the decision already accepted for templates ("replicated to
-every node's local storage").
-
-Three alternatives, and why not:
-
-- **One interface per pod VNet on a single container.** Strongest isolation
-  story — link-local, no routing permitted at all — but Proxmox caps an LXC at
-  ten NICs and Phase 5 wants a VNet *per pod*. Dead at roughly nine students.
-- **Put the cache on `prov0`.** Tempting, since `prov0` is the one subnet with
-  `snat: true` and already has egress. Rejected on architecture: `prov0` is
-  factory-time infrastructure, stripped from every shipped unit, and the
-  factory/site split is the defining split of this design. A site-time service
-  must not live on a factory-time network.
-- **Run `apt-cacher-ng` on the Proxmox host directly.** No container, no VMID,
-  no cross-node problem, bound to each VNet gateway. Rejected on blast radius:
-  this is a lab where students practice exploitation by design, and a service
-  reachable from lab networks must not run on the hypervisor.
-
-**Use an explicit proxy, not a transparent one.** Bake
-`Acquire::http::Proxy "http://<node-cache>:3142";` into template images rather
-than intercepting port 80 with DNAT. It is declarative, it is visible in the
-image, and it **fails closed** — if the cache is unreachable, `apt` errors
-instead of quietly attempting to reach the internet. It also removes the DNS
-dependency from lab guests entirely for package installs, since the proxy
-resolves upstream names on their behalf.
-
-**The cold-cache problem is the one that bites the shipped SKU.**
-`apt-cacher-ng` caches on demand, so an appliance that ships with an empty
-cache and no egress serves nothing, and the feature is decorative exactly
-where it was supposed to matter most.
-
-**Decided: the cache is seeded at the factory, and a shipped unit therefore
-requires no district internet access at all.** Seeding is a factory step in
-the same sense as template building — it belongs on the factory side of the
-defining split, and it is what turns "egress if present" from a dependency
-into an optimization.
-
-- **The validation gate doubles as the seeder.** Template finalize already
-  runs `apt-get` over `prov0`'s SNAT; pointing that at the cache instead means
-  the cache warms with exactly the package set the shipped labs actually
-  install, with no separate manifest to maintain and drift. Reuse
-  `controller-finalize-template-vm.yml` rather than building a parallel path.
-- **Supplement with an explicit manifest** for packages labs install at *run*
-  time but templates do not bake — those never pass through the factory and so
-  never warm the cache on their own. This list is small and belongs in `data/`.
-- **Pin retention.** `apt-cacher-ng` expires unreferenced files by default. On
-  an offline appliance that slowly empties a cache nothing can refill, and it
-  fails months after deployment, in someone else's classroom, looking like
-  corruption rather than configuration.
-- **Budget the disk.** Plausibly 10-20 GB per node, times node count, since
-  each node carries its own. Cheap on local NVMe, but it is not free and the
-  BOM should know.
-
-**What this reduces the district ask to.** With the cache seeded and the
-firewall enforcing isolation, the appliance needs exactly one thing from a
-district: **an inbound-reachable IP address.** No egress, no DNS, no NTP, no
-access point, no outbound firewall exceptions. That is the smallest ask this
-product can make, it is the same ask in a classroom or a central rack, and it
-shortens the Phase 7 site survey to port security, IP assignment, and physical
-location.
+**The service itself is built in Phase 2.5**, which is where its placement,
+seeding, and disk budget are decided. What belongs here is only its status as
+an exception to isolation.
 
 **The two carve-outs point in opposite directions, and that is what makes them
 testable.** Guacamole *initiates into* pod VNets and pods must never initiate
@@ -1197,11 +1258,6 @@ isolation test writes itself.
 5. Guacamole reaches pod guests; pod guests do not reach Guacamole.
 6. `apt-get update` and an install succeed through the proxy — the carve-out
    is verified working, not merely permitted.
-
-**VMID consequence: the single `801` reservation is wrong.** VMIDs are
-cluster-unique, so a per-node service cannot be one ID. `data/bootstrap-policy.yml`
-and `docs/platform-pipeline.md` now reserve `801-805`, one per node, matching
-the 3-5 node topology.
 
 ### Phase 6 — Access layer (Jan 2027)
 
@@ -1260,14 +1316,23 @@ supplement.
 
 ## Immediate next actions
 
-1. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0
-2. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
-   enough to publish as a BOM — **no longer blocked** on the student-network
-   question, which resolved to Model A for the pilot
-3. **Test whether `snat: false` actually isolates** (Phase 5) — build one
+1. **Build and seed the `apt-cacher-ng` LXCs (Phase 2.5)** — the next major
+   item. Everything else here can be reordered; this cannot, because a cache
+   can only be filled while the lab still has egress, and the current build
+   still does
+2. **Test whether `snat: false` actually isolates** (Phase 5) — build one
    section VNet, attach a guest, and try to reach the Proxmox management
    address from it. If that succeeds, isolation is a firewall project and the
-   Proxmox-firewall work moves ahead of the pod engine
+   Proxmox-firewall work moves ahead of the pod engine. Cheap to run in the
+   same lab session as item 1
+3. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
+   Worth doing *after* item 1, not before: the wipe-and-rebuild then doubles as
+   the proof that the cache is reproducible from the installer rather than a
+   hand-built artifact that happens to exist
+4. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
+   enough to publish as a BOM — **no longer blocked** on the student-network
+   question, which resolved to Model A for the pilot. Fold in the cache's
+   per-node disk once item 1 has measured it
 
 The district-sysadmin conversation is no longer an immediate action. It
 belongs to the prebuilt SKU (Phase 7) and its question list is parked in the
