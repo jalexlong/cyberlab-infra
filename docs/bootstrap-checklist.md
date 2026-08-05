@@ -70,7 +70,8 @@ mkdir -p /mnt/usb
 ./scripts/capture-host-state.sh --dest /mnt/usb/pve1-$(date +%Y%m%d)
 ```
 
-The script is read-only — it creates and modifies nothing on the host.
+The script makes no changes to host configuration. The only things it writes
+are the capture directory and its own run transcript under `/var/log/cyberlab`.
 
 Options:
 

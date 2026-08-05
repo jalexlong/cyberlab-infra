@@ -77,6 +77,71 @@ Network detector pass-through examples:
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Run logging.
+#
+# Every run leaves a transcript under /var/log/cyberlab so a failure can be
+# read after the fact instead of reconstructed from memory. Both streams are
+# captured, because the useful part of an installer run is the Ansible output
+# on stdout, not just the status lines this script prints to stderr.
+#
+# Logging must never be the reason a run fails. If the directory cannot be
+# created or written — a read-only root, a non-root caller — the script says so
+# once and carries on without a transcript.
+# ---------------------------------------------------------------------------
+readonly LOG_DIR_DEFAULT="/var/log/cyberlab"
+LOG_DIR="${CYBERLAB_LOG_DIR:-${LOG_DIR_DEFAULT}}"
+LOG_FILE=""
+
+setup_logging() {
+  local base="${SCRIPT_NAME%.sh}"
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+  if ! mkdir -p -- "${LOG_DIR}" 2>/dev/null; then
+    printf '[cyberlab-install] WARNING: cannot create %s; continuing without a log file\n' \
+      "${LOG_DIR}" >&2
+    return 0
+  fi
+
+  local candidate="${LOG_DIR}/${base}-${stamp}.log"
+  if ! : >"${candidate}" 2>/dev/null; then
+    printf '[cyberlab-install] WARNING: cannot write %s; continuing without a log file\n' \
+      "${candidate}" >&2
+    return 0
+  fi
+
+  LOG_FILE="${candidate}"
+  chmod 0640 -- "${LOG_FILE}" 2>/dev/null || true
+  ln -sfn -- "${LOG_FILE}" "${LOG_DIR}/${base}-latest.log" 2>/dev/null || true
+
+  # Joined by hand rather than with "${ORIGINAL_ARGS[*]}": these scripts set
+  # IFS to newline/tab, so the array subscript form would wrap the header
+  # across lines.
+  local args_str="" arg
+  for arg in ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}; do
+    args_str+="${arg} "
+  done
+  args_str="${args_str% }"
+  [[ -n "${args_str}" ]] || args_str="(none)"
+
+  {
+    printf '=== %s ===\n' "${SCRIPT_NAME}"
+    printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'host:    %s\n' "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+    printf 'user:    %s\n' "$(id -un 2>/dev/null || echo unknown)"
+    printf 'args:    %s\n' "${args_str}"
+    printf '===\n\n'
+  } >>"${LOG_FILE}"
+
+  # Tee both streams from here on. Command substitution elsewhere in the
+  # script is unaffected: it pipes the subshell's stdout independently of this
+  # redirection.
+  exec > >(tee -a -- "${LOG_FILE}") 2>&1
+
+  log "Logging to ${LOG_FILE}"
+}
+
 log() {
   if [[ "${QUIET}" != "1" ]]; then
     printf '[cyberlab-install] %s\n' "$*" >&2
@@ -373,7 +438,16 @@ EOF
 }
 
 main() {
+  # Recorded before parse_args consumes them, so the transcript header shows
+  # how the run was actually invoked.
+  ORIGINAL_ARGS=("$@")
+
   parse_args "$@"
+
+  # After parse_args so --help and a bad flag exit without leaving a stray
+  # empty transcript, and before require_root so a non-root run is recorded.
+  setup_logging
+
   require_root
   require_proxmox
   need_cmd apt-get

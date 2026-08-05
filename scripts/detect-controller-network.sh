@@ -60,6 +60,64 @@ Examples:
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Run logging. See install-cyberlab.sh for the rationale; the convention is
+# shared. Logging is never allowed to fail a run.
+#
+# Only stderr is teed here, unlike the other scripts. This one can emit its
+# generated YAML on stdout (--print), and that output is consumed by callers.
+# Routing it through a tee subprocess risks losing the tail of it if the script
+# exits before tee flushes. Every diagnostic already goes to stderr, so the
+# transcript loses nothing by leaving stdout alone.
+# ---------------------------------------------------------------------------
+readonly LOG_DIR_DEFAULT="/var/log/cyberlab"
+LOG_DIR="${CYBERLAB_LOG_DIR:-${LOG_DIR_DEFAULT}}"
+LOG_FILE=""
+
+setup_logging() {
+  local base="${SCRIPT_NAME%.sh}"
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+  if ! mkdir -p -- "${LOG_DIR}" 2>/dev/null; then
+    printf '[%s] WARNING: cannot create %s; continuing without a log file\n' \
+      "${SCRIPT_NAME}" "${LOG_DIR}" >&2
+    return 0
+  fi
+
+  local candidate="${LOG_DIR}/${base}-${stamp}.log"
+  if ! : >"${candidate}" 2>/dev/null; then
+    printf '[%s] WARNING: cannot write %s; continuing without a log file\n' \
+      "${SCRIPT_NAME}" "${candidate}" >&2
+    return 0
+  fi
+
+  LOG_FILE="${candidate}"
+  chmod 0640 -- "${LOG_FILE}" 2>/dev/null || true
+  ln -sfn -- "${LOG_FILE}" "${LOG_DIR}/${base}-latest.log" 2>/dev/null || true
+
+  # Joined by hand rather than with "${ORIGINAL_ARGS[*]}": these scripts set
+  # IFS to newline/tab, so the array subscript form would wrap the header
+  # across lines.
+  local args_str="" arg
+  for arg in ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}; do
+    args_str+="${arg} "
+  done
+  args_str="${args_str% }"
+  [[ -n "${args_str}" ]] || args_str="(none)"
+
+  {
+    printf '=== %s ===\n' "${SCRIPT_NAME}"
+    printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'host:    %s\n' "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+    printf 'user:    %s\n' "$(id -un 2>/dev/null || echo unknown)"
+    printf 'args:    %s\n' "${args_str}"
+    printf '===\n\n'
+  } >>"${LOG_FILE}"
+
+  exec 2> >(tee -a -- "${LOG_FILE}" >&2)
+}
+
 log() {
   if [[ "${QUIET}" != "1" ]]; then
     printf '[%s] %s\n' "${SCRIPT_NAME}" "$*" >&2
@@ -426,7 +484,16 @@ parse_args() {
 }
 
 main() {
+  # Recorded before parse_args consumes them, so the transcript header shows
+  # how the run was actually invoked.
+  ORIGINAL_ARGS=("$@")
+
   parse_args "$@"
+
+  # After parse_args so --help and a bad flag exit without leaving a stray
+  # empty transcript.
+  setup_logging
+
   log "Override bridge: ${MANAGEMENT_BRIDGE_OVERRIDE}"
   log "Override VLAN: ${CONTROLLER_VLAN_OVERRIDE}"
   log "Override DNS: ${CONTROLLER_DNS_OVERRIDE}"

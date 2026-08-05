@@ -366,6 +366,38 @@ These belong in:
 - `private/local/`
 - `private/secrets/`
 
+## Run logs
+
+Every script that acts on the Proxmox host leaves a transcript under
+`/var/log/cyberlab` on that host, so a run can be read after the fact rather
+than reconstructed from memory:
+
+```text
+/var/log/cyberlab/install-cyberlab-20260805T172022Z.log
+/var/log/cyberlab/install-cyberlab-latest.log -> the most recent run
+```
+
+Each run writes `<script>-<UTC timestamp>.log` and repoints
+`<script>-latest.log` at it. Nothing is pruned automatically; a `logrotate`
+policy belongs with appliance packaging in Phase 7. Override the location with
+`CYBERLAB_LOG_DIR`.
+
+Covered: `install-cyberlab.sh`, `capture-host-state.sh`,
+`detect-controller-network.sh`, `promote-template.sh`. The installer captures
+both streams, so its transcript contains the full Ansible output — the part
+worth reading when something fails. `detect-controller-network.sh` records only
+stderr, because its stdout is generated YAML that callers consume.
+
+`bootstrap-controller.sh` has no transcript of its own: it runs inside CT `800`
+rather than on the host, and its output is already captured in the installer's
+log by the playbook that invokes it.
+
+**Logging never fails a run.** If the directory cannot be created or written,
+the script warns once and continues without a transcript.
+
+Transcripts record commands and their output, not secrets — but treat them as
+host-local operational data rather than something to paste around.
+
 ## Secrets hygiene
 
 Do not commit generated secrets or environment-specific generated files.

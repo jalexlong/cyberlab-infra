@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Capture the state of a Proxmox host before wiping and rebuilding it.
 #
-# This script is intentionally read-only. It creates and modifies nothing on
-# the host; it copies configuration and records the output of query commands.
+# This script makes no changes to host configuration. It only reads: it copies
+# configuration and records the output of query commands. The two things it
+# writes are its capture directory, and its own run transcript under
+# /var/log/cyberlab (override with CYBERLAB_LOG_DIR). Nothing the host depends
+# on is touched.
+#
 # Run it before a deliberate teardown so the rebuild starts from recorded fact
 # rather than from memory.
 #
@@ -60,6 +64,58 @@ Example:
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Run logging. See install-cyberlab.sh for the rationale; the convention is
+# shared. Logging is never allowed to fail a run.
+# ---------------------------------------------------------------------------
+readonly LOG_DIR_DEFAULT="/var/log/cyberlab"
+LOG_DIR="${CYBERLAB_LOG_DIR:-${LOG_DIR_DEFAULT}}"
+LOG_FILE=""
+
+setup_logging() {
+  local base="${SCRIPT_NAME%.sh}"
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+  if ! mkdir -p -- "${LOG_DIR}" 2>/dev/null; then
+    printf '[capture] WARNING: cannot create %s; continuing without a log file\n' \
+      "${LOG_DIR}" >&2
+    return 0
+  fi
+
+  local candidate="${LOG_DIR}/${base}-${stamp}.log"
+  if ! : >"${candidate}" 2>/dev/null; then
+    printf '[capture] WARNING: cannot write %s; continuing without a log file\n' \
+      "${candidate}" >&2
+    return 0
+  fi
+
+  LOG_FILE="${candidate}"
+  chmod 0640 -- "${LOG_FILE}" 2>/dev/null || true
+  ln -sfn -- "${LOG_FILE}" "${LOG_DIR}/${base}-latest.log" 2>/dev/null || true
+
+  # Joined by hand rather than with "${ORIGINAL_ARGS[*]}": these scripts set
+  # IFS to newline/tab, so the array subscript form would wrap the header
+  # across lines.
+  local args_str="" arg
+  for arg in ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}; do
+    args_str+="${arg} "
+  done
+  args_str="${args_str% }"
+  [[ -n "${args_str}" ]] || args_str="(none)"
+
+  {
+    printf '=== %s ===\n' "${SCRIPT_NAME}"
+    printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'host:    %s\n' "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+    printf 'user:    %s\n' "$(id -un 2>/dev/null || echo unknown)"
+    printf 'args:    %s\n' "${args_str}"
+    printf '===\n\n'
+  } >>"${LOG_FILE}"
+
+  exec > >(tee -a -- "${LOG_FILE}") 2>&1
+}
+
 log() {
   printf '[capture] %s\n' "$*" >&2
 }
@@ -72,6 +128,10 @@ fail() {
   printf '[capture] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+# Recorded before the loop below consumes them, so the transcript header shows
+# how the run was actually invoked.
+ORIGINAL_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,8 +173,13 @@ done
 command -v pveversion >/dev/null 2>&1 ||
   fail "pveversion not found. Run this on the Proxmox host itself."
 
+# After the argument and environment checks, so a misuse exits without leaving
+# a stray empty transcript.
+setup_logging
+
 mkdir -p "${DEST}"/{config,facts}
 log "Capturing to ${DEST}"
+[[ -n "${LOG_FILE}" ]] && log "Logging to ${LOG_FILE}"
 
 # ---------------------------------------------------------------------------
 # Facts: the output of query commands. These are what make a rebuild fast.
