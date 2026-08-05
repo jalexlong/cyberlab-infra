@@ -1,25 +1,34 @@
 ---
 # Bootstrap Proxmox SDN for Cyberlab.
 #
-# Builds two classes of network:
+# Knows about two classes of network, and by default builds only the first:
 #
 #   1. Infrastructure networks, declared in ansible/inventory.yml under
 #      proxmox_sdn. Currently just prov0, the provisioning network used to
 #      build templates. This one keeps SNAT so template builds can reach
-#      package repositories.
+#      package repositories. Always built.
 #
 #   2. Per-section classroom networks, derived from
 #      data/environments/<env>.yml. These deliberately have SNAT disabled so
 #      lab traffic cannot reach the school network or the internet, and
 #      isolate-ports disabled so students within a section can reach each
-#      other's machines.
+#      other's machines. NOT built unless asked for — see
+#      cyberlab_sdn_build_sections below.
+#
+# The classroom topology is Phase 5 work and exists on no host today. The
+# provisioning network is different: the template factory cannot function
+# without it, because every template in ansible/vars/templates.yml is built and
+# validated on prov0 and addressed from its subnet.
 #
 # Usage:
 #   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml
 #   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml -e cyberlab_env=demo-lab
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-sdn.yml -e cyberlab_sdn_build_sections=true
 #
 # This playbook is additive. It never deletes VNets or subnets it does not
-# recognise, so hand-built networks are left untouched.
+# recognise, so hand-built networks are left untouched. That also means
+# switching cyberlab_sdn_build_sections back to false does not remove
+# classroom VNets an earlier run created; tear those down deliberately.
 
 - name: Bootstrap Proxmox SDN from controller
   hosts: proxmox_targets
@@ -27,6 +36,12 @@
 
   vars:
     cyberlab_env: school-lab
+
+    # Whether to build the per-section classroom VNets from the environment
+    # file. Off by default: those networks are Phase 5 work, exist on no host,
+    # and a plain run of this playbook should not resurrect a topology nobody
+    # asked for. Infrastructure networks are always built.
+    cyberlab_sdn_build_sections: false
 
     repo_root: "{{ playbook_dir }}/../.."
     environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
@@ -80,8 +95,23 @@
       {%- endfor -%}
       {{ out }}
 
-    all_vnets: "{{ (proxmox_sdn.vnets | default([])) + section_vnets }}"
-    all_subnets: "{{ (proxmox_sdn.subnets | default([])) + section_subnets }}"
+    # Everything declared across both sources, whether or not this run builds
+    # it. The name checks below validate against this, so a section VNet with
+    # an over-long or duplicate name is still caught on an infrastructure-only
+    # run rather than lying in wait until sections are switched on.
+    declared_vnets: "{{ (proxmox_sdn.vnets | default([])) + section_vnets }}"
+
+    # What this run actually creates.
+    all_vnets: >-
+      {{
+        (proxmox_sdn.vnets | default([]))
+        + (section_vnets if (cyberlab_sdn_build_sections | bool) else [])
+      }}
+    all_subnets: >-
+      {{
+        (proxmox_sdn.subnets | default([]))
+        + (section_subnets if (cyberlab_sdn_build_sections | bool) else [])
+      }}
 
   tasks:
     - name: Require every environment section to exist in sections.yml
@@ -105,16 +135,16 @@
           {{ oversized_vnets | join(', ') }}
       vars:
         oversized_vnets: >-
-          {{ all_vnets | map(attribute='name') | select('match', '^.{9,}$') | list }}
+          {{ declared_vnets | map(attribute='name') | select('match', '^.{9,}$') | list }}
 
     - name: Require VNet names to be unique
       ansible.builtin.assert:
         that:
-          - (all_vnets | map(attribute='name') | list | length)
-            == (all_vnets | map(attribute='name') | unique | list | length)
+          - (declared_vnets | map(attribute='name') | list | length)
+            == (declared_vnets | map(attribute='name') | unique | list | length)
         fail_msg: >-
           Duplicate VNet names detected across infrastructure and section
-          networks: {{ all_vnets | map(attribute='name') | list | sort | join(', ') }}
+          networks: {{ declared_vnets | map(attribute='name') | list | sort | join(', ') }}
 
     - name: Show the SDN plan
       ansible.builtin.debug:
@@ -122,8 +152,17 @@
           - "environment: {{ cyberlab_env }}"
           - "zone: {{ zone_name }}"
           - "infrastructure vnets: {{ proxmox_sdn.vnets | default([]) | map(attribute='name') | join(', ') }}"
-          - "section vnets: {{ section_vnets | map(attribute='name') | join(', ') }}"
-          - "section networks have snat=false and isolate-ports=false"
+          - >-
+            {{
+              'section vnets: ' ~ (section_vnets | map(attribute='name') | join(', '))
+              ~ ' (snat=false, isolate-ports=false)'
+              if (cyberlab_sdn_build_sections | bool)
+              else 'section vnets: NOT being built. '
+                   ~ (section_vnets | length) ~ ' are declared in '
+                   ~ cyberlab_env ~ ' and will be skipped. '
+                   ~ 'Pass -e cyberlab_sdn_build_sections=true to build them.'
+            }}
+          - "this run will create: {{ all_vnets | map(attribute='name') | join(', ') }}"
 
     - name: Check whether SDN zone exists
       ansible.builtin.command:
