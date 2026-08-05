@@ -18,8 +18,8 @@ DOCS = sorted((REPO_ROOT / "docs").glob("*.md")) + [REPO_ROOT / "README.md"]
 
 # Repo-relative paths under a known top-level directory.
 PATH_PATTERN = re.compile(
-    r"\b((?:docs|data|ansible|scripts|tests|opentofu|private)"
-    r"/[A-Za-z0-9_./-]+\.(?:yml|yaml|md|sh|py|tf|txt|cfg))"
+    r"\b((?:docs|data|ansible|scripts|tests|private)"
+    r"/[A-Za-z0-9_./-]+\.(?:yml|yaml|md|sh|py|txt|cfg))"
 )
 
 # Paths that are deliberately referenced without existing. Keep this list short

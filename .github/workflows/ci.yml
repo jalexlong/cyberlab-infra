@@ -40,7 +40,7 @@ jobs:
         run: ansible-lint --offline ansible/
 
       - name: ruff
-        run: ruff check scripts/
+        run: ruff check scripts/ tests/
 
       - name: shellcheck
         run: |

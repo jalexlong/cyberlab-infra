@@ -185,8 +185,7 @@ cyberlab-infra/
 │   ├── promote-template.sh
 │   └── generate_runtime_artifacts.py
 ├── tests/                      # repository invariants; no Proxmox needed
-├── private/                    # never committed; see Secrets hygiene
-└── opentofu/                   # currently empty; see roadmap decision
+└── private/                    # never committed; see Secrets hygiene
 ```
 
 ## Source-of-truth files
@@ -417,9 +416,9 @@ document. In short:
   `data/slots.yml`; formalize the factory/site split so nothing at a deployment
   site needs the internet; design the pod provisioning engine.
 - **Direction changes worth knowing:** student access moves to a control plane
-  plus Guacamole rather than per-student Proxmox identities; OpenTofu is not
-  the right tool for pods created and destroyed many times a day and may be
-  dropped entirely.
+  plus Guacamole rather than per-student Proxmox identities; OpenTofu has been
+  dropped — Ansible plus a control plane covers the need, and a declarative IaC
+  tool is a poor fit for pods created and destroyed many times a day.
 
 ## Notes for future me
 

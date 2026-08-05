@@ -109,7 +109,6 @@ Environment selection and runtime detection must be shared by:
 
 - installer scripts
 - Ansible
-- OpenTofu
 - runtime artifact generation
 - validation workflows
 

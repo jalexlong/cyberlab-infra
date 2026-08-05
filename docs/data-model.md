@@ -477,5 +477,5 @@ Recommended pipeline:
 1. read `teachers.yml`, `sections.yml`, `slots.yml`, `policy.yml`, and environment file
 2. generate runtime student identities and passwords
 3. write private exports into `private/`
-4. use generated artifacts as input to OpenTofu and Ansible where needed
+4. use generated artifacts as input to Ansible where needed
 

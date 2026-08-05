@@ -135,22 +135,14 @@ def test_shell_scripts_set_strict_mode(path):
     )
 
 
-def test_no_empty_tracked_files_outside_known_placeholders():
-    """Empty tracked files are usually accidents.
+def test_no_empty_tracked_files():
+    """Empty tracked files are almost always accidents.
 
-    The four `opentofu/*.tf` files are known-empty placeholders whose fate is
-    an open decision in docs/roadmap.md; everything else should have content.
+    The four `opentofu/*.tf` placeholders used to be exempted here. OpenTofu
+    has since been dropped and they were deleted, so the exemption is gone too
+    — an allowlist that outlives its reason is worse than no allowlist.
     """
-    known_empty = {
-        "opentofu/locals.tf",
-        "opentofu/main.tf",
-        "opentofu/outputs.tf",
-        "opentofu/variables.tf",
-    }
-    empty = {
+    empty = sorted(
         _rel(p) for p in TRACKED if p.is_file() and p.stat().st_size == 0
-    }
-    unexpected = empty - known_empty
-    assert not unexpected, (
-        f"Unexpected empty tracked files: {', '.join(sorted(unexpected))}"
     )
+    assert not empty, f"Empty tracked files: {', '.join(empty)}"

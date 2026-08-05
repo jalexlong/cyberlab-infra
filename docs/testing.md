@@ -36,7 +36,7 @@ Then run the full set:
 ```bash
 .venv/bin/yamllint ansible/ data/ .github/
 .venv/bin/ansible-lint --offline ansible/
-.venv/bin/ruff check scripts/
+.venv/bin/ruff check scripts/ tests/
 shellcheck --severity=warning scripts/*.sh
 .venv/bin/python -m pytest tests/
 ```

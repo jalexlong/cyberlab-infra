@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import PLAYBOOKS, find_play, load_playbook
+from conftest import PLAYBOOKS, load_playbook
 
 
 def _declared_hosts(play: dict) -> list[str]:

@@ -101,7 +101,6 @@ a validation that fails. Worth a CI check in Phase 1.
 
 - **Per-section VNets are never created.** Only `prov0` exists.
 - **No egress control** on classroom networks.
-- **OpenTofu files still empty** — see decision below.
 - **Phase 0 exit remains unproven.** The fixes are correct by inspection but
   have not been run against live Proxmox hardware.
 - **ansible-lint runs at `basic` with four rules deferred** (`fqcn`,
@@ -110,21 +109,22 @@ a validation that fails. Worth a CI check in Phase 1.
   working host, so each should be retired with a hardware run behind it. See
   `.ansible-lint`.
 
-### Known hazard: `proxmox-sdn.yml` is stale and contradicts the working path
+### Resolved: `proxmox-sdn.yml` deleted
 
-It hardcodes `sdn_zone: "cyberlab"`, but the platform's zone is `virtnet`
-(`ansible/inventory.yml`, and the promoted-template milestone).
-`controller-bootstrap-sdn.yml` is the current, tested path and reads the zone
-from `proxmox_sdn.zone.name`. Running `proxmox-sdn.yml` against a live host
-would create a **second, divergent SDN zone** alongside the real one.
+It hardcoded `sdn_zone: "cyberlab"` while the platform's zone is `virtnet`
+(`ansible/inventory.yml`, and the promoted-template milestone), so running it
+against a live host would have created a **second, divergent SDN zone**
+alongside the real one. `controller-bootstrap-sdn.yml` is the current, tested
+path and reads the zone from `proxmox_sdn.zone.name`.
 
-It was previously inert by accident — it targeted `hosts: poseidon`, which is
-absent from inventory, so it ran zero tasks. Retargeting it to
-`proxmox_targets` to satisfy the inventory check made it genuinely runnable
-against `pve1`. **Do not run this playbook.** It should be deleted (the repo
-has precedent — `template_env.py`, `build-imported-templates.sh`,
-`create-installer-template-vms.sh`) or rewritten to consume `proxmox_sdn`
-rather than its own constants. Decide before the next hardware session.
+Worth recording how close this came to being a live incident. The playbook was
+inert only by accident — it targeted `hosts: poseidon`, absent from inventory,
+so it ran zero tasks and exited zero. Retargeting it to `proxmox_targets` to
+satisfy the new inventory check made it genuinely runnable against `pve1`. A
+lint fix converted a dead playbook into a loaded one, and only a manual read
+of the file caught it. Two lessons: a playbook that "passes" by matching no
+hosts is not passing, and mechanically satisfying a linter can raise real risk
+while lowering apparent risk.
 
 ---
 
@@ -172,7 +172,6 @@ is the verification they need anyway.
 | Retire `no-changed-when` | Several hits are genuine idempotency bugs, several are correct as written (reconcile tasks that really do change state each run). Needs per-task judgement plus a run to confirm | Phase 1 |
 | Retire `risky-shell-pipe` | `set -o pipefail` changes failure semantics of shell tasks that currently tolerate a failing pipe stage | Phase 1 |
 | Retire `name` | Cosmetic; safe to do any time, but bundle it with a run | Phase 1 |
-| Resolve `proxmox-sdn.yml` (delete or rewrite) | Deciding is a laptop task; confirming nothing depended on it wants a host | Above |
 | Measure real per-VM and per-LXC RAM | Every sizing number in this document is an estimate | Phase 3 |
 | Right-size `slots.yml` from those measurements | See the RAM budget section — currently ~22.5 GB/student | Phase 3/4 |
 | Validate the template pipeline end to end offline | prepare → finalize → promote → validate, plus a deliberately broken image failing the gate | Phase 2 |
@@ -189,9 +188,9 @@ the pod-engine design.
 ### Factory versus site — the defining split
 
 **A shipped appliance cannot build its own templates.** The pipeline currently
-downloads Debian cloud images, `apt-get install`s from Debian repos, adds the
-OpenTofu apt repo, and pulls LXC templates via `pveam`. Commit `5dd0092` added
-`prov0` egress specifically so template builds could reach the internet.
+downloads Debian cloud images, `apt-get install`s from Debian repos, and pulls
+LXC templates via `pveam`. Commit `5dd0092` added `prov0` egress specifically
+so template builds could reach the internet.
 
 With no connectivity assumed, the system splits in two:
 
@@ -209,9 +208,13 @@ only needs to clone from images already present.
 
 **Work this implies:**
 
-- `bootstrap-controller.sh` currently runs `apt-get update`/`install` and adds
-  the OpenTofu apt repo. That becomes a factory step baked into the controller
-  LXC image.
+- `bootstrap-controller.sh` currently runs `apt-get update`/`install`. That
+  becomes a factory step baked into the controller LXC image. Dropping
+  OpenTofu already removed its third-party apt repository and GPG key from
+  this path, leaving only Debian repositories to account for.
+- The controller also needs the `community.proxmox` collection from Galaxy
+  (`ansible/requirements.yml`). Same problem, same answer: vendor it into the
+  image at build time.
 - `host-bootstrap.yml` runs `pveam download`. Factory step.
 - Templates must be replicated to every node's local storage, because linked
   clones require the template on the same storage as the clone.
@@ -421,13 +424,22 @@ Community Edition caps at 5 concurrent sessions and forbids revenue-generating
 use, failing both the concurrency target and the prebuilt SKU. Guacamole
 (Apache 2.0) carries no such terms.
 
-### Provisioning tool
+### Provisioning tool — decided: Ansible, no OpenTofu
 
-The four `.tf` files are empty, which is fortunate. OpenTofu is poor for
-resources created and destroyed many times a day per user. Provision pods from
-the control plane directly. Reserve OpenTofu for durable infrastructure or drop
-it. If any IaC ships: **OpenTofu (MPL 2.0), never Terraform (BUSL 1.1, not open
-source).**
+**OpenTofu is dropped.** The four `.tf` files were empty and have been removed,
+along with the OpenTofu install from `bootstrap-controller.sh`.
+
+A declarative IaC tool is a poor fit for resources created and destroyed many
+times a day per user: pods have no meaningful desired state between lab
+periods, and reconciling them against a state file is friction with no payoff.
+Ansible plus the control plane covers everything the platform actually does.
+
+Removing it also deletes an internet-dependent bootstrap step — the OpenTofu
+apt repository and GPG key — which is a direct win for the factory/site split
+above. One fewer external dependency to vendor into an offline appliance.
+
+If IaC is ever revisited for durable infrastructure: **OpenTofu (MPL 2.0),
+never Terraform (BUSL 1.1, not open source).**
 
 ### Content licensing
 
@@ -502,7 +514,8 @@ while building this:
 - **`proxmox-sdn.yml` targeted `hosts: poseidon`**, absent from inventory.
   Both `--syntax-check` and `bash -n` passed on it. This is the worst failure
   mode available: a play aimed at a nonexistent group runs zero tasks and exits
-  zero. Retargeted to `proxmox_targets`.
+  zero. The playbook has since been deleted as stale — see the resolution note
+  in the current state section.
 - **`policy.yml`'s `username_policy` was loaded and discarded** —
   `format_student_username` hardcoded the same pattern, so editing the
   source-of-truth file changed nothing. Now consumed, matching how

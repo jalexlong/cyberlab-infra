@@ -9,7 +9,6 @@ It exists so that Cyberlab automation is **not** run directly from the Proxmox h
 The controller LXC is the system that runs:
 
 - Ansible
-- OpenTofu
 - supporting Python tooling
 - the Cyberlab repo
 - environment selection helpers
@@ -41,7 +40,7 @@ The controller LXC should remain focused on being:
 - the automation runner
 - the repo host
 - the operator interface
-- the place where Ansible and OpenTofu are installed
+- the place where Ansible is installed
 
 This separation provides a cleaner trust boundary and better operational hygiene.
 
@@ -54,7 +53,6 @@ The controller LXC is responsible for:
 - cloning and updating the Cyberlab repo
 - storing environment-aware automation tooling
 - running Ansible playbooks
-- running OpenTofu plans and applies
 - storing private generated artifacts
 - storing environment-specific secrets securely
 - providing a stable shell environment for operators
@@ -105,7 +103,7 @@ Debian 13 is a good fit for the controller because it is:
 - stable
 - well supported
 - easy to automate
-- appropriate for Ansible/OpenTofu/python tooling
+- appropriate for Ansible/python tooling
 - modern enough for current package ecosystems
 
 The controller is not a classroom payload image. It is an automation appliance.
@@ -170,7 +168,6 @@ Typical packages and tools include:
 - python3
 - python3-yaml
 - ansible
-- OpenTofu
 - openssh-client
 
 Additional tooling may be added as required, but the controller should not become a general-purpose utility VM.
@@ -191,7 +188,6 @@ This repo should include:
 - `docs/`
 - `scripts/`
 - `ansible/`
-- `opentofu/`
 - `private/` or equivalent non-public workspace
 
 The controller should be treated as the canonical automation runtime, not necessarily the canonical Git origin.
@@ -278,7 +274,6 @@ A controller LXC is considered ready when:
 - it is reachable by SSH
 - the Cyberlab repo is present
 - `ansible --version` works
-- `tofu version` works
 - environment selection works
 - private workspace exists
 - secrets can be loaded securely

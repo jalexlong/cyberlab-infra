@@ -18,7 +18,7 @@ At the end of this checklist, you should have:
 - a dedicated Cyberlab automation identity and API token
 - a dedicated automation controller LXC
 - the Cyberlab repo cloned into the controller
-- Ansible and OpenTofu available in the controller
+- Ansible available in the controller
 - environment selection working
 - the platform ready for SDN, templates, and deployment phases
 
