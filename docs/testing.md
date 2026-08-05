@@ -310,14 +310,46 @@ and is NIC-less as convention requires, with the NIC stripped at promotion.
 broken image must fail validation. Run 1 is suggestive but not that test — it
 was an accidental failure, not a planted one.
 
-### Known gap: nothing verifies the agent before promotion
+### Closed: promotion is now gated on a working guest agent (`a835073`)
 
-`controller-finalize-template-vm.yml` runs `systemctl enable qemu-guest-agent
-|| true`, and `controller-promote-template.yml` checks nothing about the guest.
-A template whose package install silently failed can still be promoted, and the
-first sign of trouble arrives later at the validation gate — which is what
-happened here across a three-month gap. A check at the end of finalize, before
-promotion, would catch it at the point of failure instead.
+The gap above is fixed. `controller-finalize-template-vm.yml` verifies over SSH
+that `qemu-guest-agent` is installed and enabled, and refuses to continue
+otherwise; the `|| true` that swallowed the enable failure is gone.
+
+That check lives at the end of finalize because it is the last point the guest
+can be inspected. `controller-promote-template.yml` cannot examine a stopped
+guest and must not boot one to try — finalize truncates `/etc/machine-id` and
+removes the SSH host keys as its final act, so booting would regenerate them
+into every clone. Promote instead guards the path that skips finalize: a VM
+still running has its agent pinged, and the `agent:` flag in its config must
+match the catalog.
+
+**Both directions were tested on `pve1`, because a gate that has only ever
+passed is not proven — which is the whole lesson of the run above.**
+
+Negative — VM `900` prepared but not finalized, left running with no agent:
+
+```text
+Require a responding guest agent before promoting a running VM
+fatal: [pve1]: FAILED!
+pve1 : ok=8  changed=0  failed=1
+```
+
+Afterwards `qm config 900` still had no `template:` line: promotion was
+blocked, and nothing was half-applied on the way out.
+
+Positive — full pipeline on the same VM:
+
+```text
+Require the guest agent before the template can be promoted
+  msg: qemu-guest-agent is installed and enabled in tpl-debian13-base.
+pve1 : ok=101  changed=14  failed=0
+validation_passed=true
+```
+
+In that passing run promote's running-VM ping **skipped**, because finalize had
+already stopped the guest. That is the expected path and the reason the
+finalize check is the authoritative one rather than a convenience.
 
 ---
 
