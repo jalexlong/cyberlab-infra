@@ -508,6 +508,58 @@
       failed_when: false
       become: true
 
+    # Reconciling the controller's network means stopping it, and pct set is
+    # not a comparison — it writes whatever it is given. Applying it
+    # unconditionally therefore bounced CT 800 on every run of the installer,
+    # even when nothing differed, and each bounce dropped its DHCP lease, so
+    # the controller's address moved. Compare first, and touch it only when it
+    # actually differs.
+    - name: Read current controller LXC configuration
+      ansible.builtin.command: "pct config {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
+      register: controller_config_current
+      changed_when: false
+      failed_when: false
+      become: true
+
+    # pct stores net0 with fields it assigns itself — hwaddr and type — that
+    # were never requested, so the desired string is a subset of the stored one
+    # and never equal to it. Compare field by field rather than as a string.
+    - name: Determine whether controller network or DNS need reconciling
+      ansible.builtin.set_fact:
+        controller_net0_current_parts: >-
+          {{
+            controller_config_current.stdout_lines
+            | select('match', '^net0:')
+            | map('regex_replace', '^net0:\s*', '')
+            | list | first | default('') | split(',')
+          }}
+        controller_nameserver_current: >-
+          {{
+            controller_config_current.stdout_lines
+            | select('match', '^nameserver:')
+            | map('regex_replace', '^nameserver:\s*', '')
+            | list | first | default('')
+          }}
+
+    - name: Decide whether the controller needs a network reconcile
+      ansible.builtin.set_fact:
+        controller_network_needs_reconcile: >-
+          {{
+            (controller_net0 | split(',') | difference(controller_net0_current_parts) | length > 0)
+            or
+            ((controller_nameserver_current | split | join(' '))
+             != (controller_nameservers_arg | split | join(' ')))
+          }}
+
+    - name: Report controller network reconcile decision
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Controller network differs from desired; it will be stopped and reconciled.'
+            if controller_network_needs_reconcile
+            else 'Controller network already matches desired configuration; leaving it running.'
+          }}
+
     - name: Stop controller LXC before network reconciliation when already running
       ansible.builtin.command: "pct stop {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
       register: controller_stop_for_network_reconcile
@@ -515,6 +567,7 @@
       failed_when: false
       become: true
       when:
+        - controller_network_needs_reconcile | bool
         - controller_status_before_network_reconcile.rc == 0
         - "'status: running' in controller_status_before_network_reconcile.stdout"
 
@@ -523,27 +576,36 @@
         pct set {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
         --net0 {{ controller_net0 | quote }}
       register: controller_network_reconcile
-      changed_when: true
+      changed_when: controller_network_reconcile.rc == 0
       become: true
+      when: controller_network_needs_reconcile | bool
 
     - name: Reconcile controller LXC DNS
       ansible.builtin.command: >
         pct set {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
         --nameserver {{ controller_nameservers_arg | quote }}
       register: controller_dns_reconcile
-      changed_when: true
+      changed_when: controller_dns_reconcile.rc == 0
       become: true
+      when: controller_network_needs_reconcile | bool
 
+    # Start when the controller is not already running — either because it was
+    # just created, was found stopped, or was stopped above to be reconciled.
     - name: Start automation controller LXC
       command: "pct start {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
       register: controller_start
       changed_when: controller_start.rc == 0
       failed_when: false
       become: true
+      when: >-
+        controller_network_needs_reconcile | bool
+        or controller_status_before_network_reconcile.rc != 0
+        or 'status: running' not in controller_status_before_network_reconcile.stdout
 
     - name: Wait briefly after starting controller
       pause:
         seconds: 10
+      when: controller_start is changed
 
     - name: Validate controller CT network before package install
       block:

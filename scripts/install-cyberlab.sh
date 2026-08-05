@@ -334,17 +334,30 @@ show_runtime_summary() {
   log "  rotate_api_token=${ROTATE_API_TOKEN}"
 }
 
+# Report a phase as done or skipped. The summary previously hardcoded every
+# phase as completed, so `--skip-sdn-bootstrap` still printed "SDN zone and
+# VNET bootstrap" under "Completed phases" — the run reported work it had just
+# announced it was skipping.
+phase_line() {
+  local skipped="$1" label="$2"
+  if [[ "${skipped}" -eq 1 ]]; then
+    printf -- '- %s (SKIPPED)\n' "${label}"
+  else
+    printf -- '- %s\n' "${label}"
+  fi
+}
+
 show_success_summary() {
   cat <<EOF
 
 [cyberlab-install] Platform bootstrap complete.
 
-Completed phases:
-- Proxmox host bootstrap
-- Controller CT ${CONTROLLER_CTID} bootstrap
-- Controller SSH trust bootstrap
-- Proxmox API validation from controller
-- SDN zone and VNET bootstrap
+Phases:
+$(phase_line 0 "Proxmox host bootstrap")
+$(phase_line 0 "Controller CT ${CONTROLLER_CTID} bootstrap")
+$(phase_line 0 "Controller SSH trust bootstrap")
+$(phase_line "${SKIP_CONTROLLER_VALIDATE}" "Proxmox API validation from controller")
+$(phase_line "${SKIP_SDN_BOOTSTRAP}" "SDN zone and VNET bootstrap")
 
 Useful checks:
   pct status ${CONTROLLER_CTID}
