@@ -888,6 +888,11 @@ image can no longer be produced in the first place.
   and entirely untested. Every build so far has pulled a cloud image and run
   `apt-get` over `prov0`'s SNAT, which is exactly what a shipped appliance
   cannot do. This is the factory/site split, and it is the larger piece.
+  **Extend the exit criterion:** a lab guest must complete `apt-get update`
+  and an install from the factory-seeded package cache with the appliance's
+  uplink *physically disconnected*. Unplugging the cable is the only version
+  of this test that cannot pass for the wrong reason — a firewall rule or a
+  route can be wrong in a way that still resolves and still fetches.
 - **The other four templates.** Only `debian13` has been built live.
   `win7` and `metasploitable2` set `agent_enabled: false`, so they take a
   different validation path than the one now proven, and neither is a
@@ -1038,6 +1043,68 @@ another section, (c) reach `10.30.0.1`. If those succeed, isolation is a
 firewall project, not an SDN-flag project, and every design below depends on
 it.
 
+#### Isolation enforcement — decided: Proxmox firewall, not a firewall VM
+
+Isolation is enforced by the **built-in Proxmox firewall**. A dedicated
+firewall appliance (OPNsense or similar) is rejected as the platform boundary.
+
+**Why the built-in one wins here:**
+
+- **It is enforced at the guest's own tap/veth interface, not at a routing
+  chokepoint.** That is the direct fix for the defect above: a per-guest
+  default-deny holds no matter how permissively the host routes between VNets,
+  so isolation stops depending on the SDN topology being right.
+- **Rules live in `/etc/pve/`**, which is the replicated cluster filesystem, so
+  they propagate to every node with no extra machinery — and node-local pod
+  networks make that matter.
+- **No new Proxmox privileges.** Cluster and host rules need `Sys.Modify`;
+  per-guest rules need `VM.Config.Network`. Both are already in
+  `automation_role_privs` and both are already asserted by
+  `controller-validate-proxmox-api.yml`. Adoption costs nothing on the
+  access-control side.
+- **Zero RAM**, against 2-4 GB per node for a firewall VM — real money on nodes
+  already over budget at 22.5 GB/student.
+- **Text config is reproducible from the public recipe**, consistent with the
+  licensing position, where a VM appliance is another image to distribute.
+
+**The argument that actually settles it, though, is pedagogical.** This is a
+lab where students study, misconfigure, and attack firewalls by design. The
+mechanism enforcing their containment must not be the mechanism they are
+learning to break. If OPNsense were the platform boundary, a student who
+successfully misconfigures the teaching firewall would thereby breach platform
+isolation — the blast radius of a *correct* lab exercise would include the
+platform. Keeping enforcement in the hypervisor, below anything a pod can
+reach, keeps those two concerns from ever touching.
+
+**So OPNsense is reclassified: curriculum, not infrastructure.** It is a good
+lab template — BSD-2-Clause, no licensing friction, and firewall
+administration is genuinely in the pathway — living *inside* a pod as
+something students configure. It is simply never the platform's own boundary.
+Worth adding to the template catalog on those grounds; worth nothing as
+infrastructure.
+
+**The gotcha that must be designed in, not discovered:** the Proxmox firewall
+applies to a NIC only when that NIC has `firewall=1` in the guest config. A
+guest missing it is **silently unfiltered** — rules present, correct, and not
+applied. That is precisely the failure class this repository has already been
+bitten by twice (the playbook targeting an absent host, `username_policy`
+loaded and discarded). The pod engine sets the flag, and the isolation test
+asserts it **per guest** rather than trusting that it was set.
+
+Rule shape, stateful so return traffic needs no rule of its own:
+
+- Datacenter: `enable: 1`.
+- Every lab guest: `policy_in: DROP`, `policy_out: DROP`.
+- One security group applied to every lab guest:
+  - OUT → package cache, tcp/3142 only
+  - OUT → VNet gateway, udp/67-68 and 53
+  - OUT → its own pod subnet, so students can reach their own targets
+  - IN ← its own pod subnet
+  - IN ← Guacamole, console ports only
+- `host.fw`: drop lab subnets to the management address, as defence in depth.
+  Guest-level `policy_out: DROP` should already prevent it; both, because this
+  is the assertion most likely to be quietly wrong.
+
 #### Package cache — the second deliberate carve-out
 
 Fills the VMID reservation for a "future apt-cache or package mirror service"
@@ -1078,12 +1145,37 @@ resolves upstream names on their behalf.
 **The cold-cache problem is the one that bites the shipped SKU.**
 `apt-cacher-ng` caches on demand, so an appliance that ships with an empty
 cache and no egress serves nothing, and the feature is decorative exactly
-where it was supposed to matter most. **The factory must seed the cache**, and
-seeding is a factory step in the same sense as template building. Two
-consequences: budget the disk (a seeded Debian set for lab tooling is
-plausibly 10-20 GB per node, times node count), and pin the retention config —
-`apt-cacher-ng` expires unreferenced files by default, which on an offline
-appliance would slowly empty the cache with nothing able to refill it.
+where it was supposed to matter most.
+
+**Decided: the cache is seeded at the factory, and a shipped unit therefore
+requires no district internet access at all.** Seeding is a factory step in
+the same sense as template building — it belongs on the factory side of the
+defining split, and it is what turns "egress if present" from a dependency
+into an optimization.
+
+- **The validation gate doubles as the seeder.** Template finalize already
+  runs `apt-get` over `prov0`'s SNAT; pointing that at the cache instead means
+  the cache warms with exactly the package set the shipped labs actually
+  install, with no separate manifest to maintain and drift. Reuse
+  `controller-finalize-template-vm.yml` rather than building a parallel path.
+- **Supplement with an explicit manifest** for packages labs install at *run*
+  time but templates do not bake — those never pass through the factory and so
+  never warm the cache on their own. This list is small and belongs in `data/`.
+- **Pin retention.** `apt-cacher-ng` expires unreferenced files by default. On
+  an offline appliance that slowly empties a cache nothing can refill, and it
+  fails months after deployment, in someone else's classroom, looking like
+  corruption rather than configuration.
+- **Budget the disk.** Plausibly 10-20 GB per node, times node count, since
+  each node carries its own. Cheap on local NVMe, but it is not free and the
+  BOM should know.
+
+**What this reduces the district ask to.** With the cache seeded and the
+firewall enforcing isolation, the appliance needs exactly one thing from a
+district: **an inbound-reachable IP address.** No egress, no DNS, no NTP, no
+access point, no outbound firewall exceptions. That is the smallest ask this
+product can make, it is the same ask in a classroom or a central rack, and it
+shortens the Phase 7 site survey to port security, IP assignment, and physical
+location.
 
 **The two carve-outs point in opposite directions, and that is what makes them
 testable.** Guacamole *initiates into* pod VNets and pods must never initiate
@@ -1150,9 +1242,11 @@ fail silently.
 - **IP assignment** — static or DHCP reservation, on which VLAN, and whether
   students' devices can route to it. A correct IP on a segment students cannot
   reach is the second silent failure.
-- **Whether egress is permitted** for host updates and the apt cache. The unit
-  functions without it; it just stops self-updating. Ask so the answer is
-  recorded, not discovered.
+- **Whether egress is permitted** — worth recording, but **not a requirement**.
+  The package cache ships seeded from the factory (see Phase 5), so a unit with
+  no outbound path runs labs normally; egress only buys automatic host patching
+  and a self-refreshing cache. Ask so the answer is recorded rather than
+  assumed, and so a district that grants it gets the benefit.
 - **Switch port count available**, if the unit uplinks to district
   infrastructure rather than carrying its own switch.
 
@@ -1170,8 +1264,10 @@ supplement.
 2. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM — **no longer blocked** on the student-network
    question, which resolved to Model A for the pilot
-3. Design the apt-cache service into VMID `801` as a Phase 5 isolation
-   carve-out, alongside the access LXC rather than after it
+3. **Test whether `snat: false` actually isolates** (Phase 5) — build one
+   section VNet, attach a guest, and try to reach the Proxmox management
+   address from it. If that succeeds, isolation is a firewall project and the
+   Proxmox-firewall work moves ahead of the pod engine
 
 The district-sysadmin conversation is no longer an immediate action. It
 belongs to the prebuilt SKU (Phase 7) and its question list is parked in the
