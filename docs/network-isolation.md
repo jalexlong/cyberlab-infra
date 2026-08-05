@@ -21,20 +21,27 @@ The goal is stated negatively on purpose: **no packet leaves the uplink unless
 a rule exists that says it should.** Default-deny outbound, not default-allow
 with exceptions bolted on.
 
-### Ranked by how much damage it does
+### Ranked by expected damage
 
-Design attention should follow this order, not the order things appear in a
-config file.
+Probability times severity, not severity alone. An earlier draft of this
+document ranked by severity and put rogue DHCP and BPDUs at the top; both are
+severe but neither is likely, and ranking that way misdirects attention toward
+exotic failures and away from the ones that will actually happen by default.
 
-| # | Leak | Consequence |
-|---|---|---|
-| 1 | **Rogue DHCP** — SDN `dnsmasq` answering on the uplink | School devices take `10.30.0.x` leases and lose network. Ejection from the district network, and deservedly |
-| 2 | **BPDUs from a Linux bridge** | BPDU guard shuts the switch port. Visible outage, and the sysadmin's logs name us |
-| 3 | **Corosync heartbeat on the uplink** | Constant unexplained UDP between unknown hosts, every few hundred ms, forever |
-| 4 | **Lab guest traffic escaping** | Looks exactly like an internal attacker. `nmap` from a student VM is indistinguishable from a real compromise |
-| 5 | **Phone-home** — subscription checks, `apt` timers, NTP pools | Unexplained outbound to the internet from a box that was sold as air-gapped |
-| 6 | **mDNS / LLMNR / NetBIOS broadcast** | Noise; clutters discovery tooling |
-| 7 | **Stray ICMP** | Mostly harmless, but trivially avoidable |
+| # | Leak | Likelihood | Consequence |
+|---|---|---|---|
+| 1 | **Lab guest traffic escaping** | **High** — depends on firewall rules being right, and `snat: false` is already suspected insufficient (roadmap, Phase 5) | Looks exactly like an internal attacker. `nmap` from a student VM is indistinguishable from a real compromise |
+| 2 | **Phone-home** — subscription checks, `apt` timers, NTP pools | **High** — on by default; happens unless explicitly suppressed | Unexplained outbound to the internet from a box sold as air-gapped. Erodes the central product claim |
+| 3 | **Corosync heartbeat on the uplink** | **Moderate** — only if the cluster network is not physically separated | Constant unexplained UDP between unknown hosts, every few hundred ms, forever |
+| 4 | **mDNS / LLMNR / NetBIOS broadcast** | **Moderate** — if `avahi-daemon` is installed | Noise; clutters discovery tooling |
+| 5 | **Stray ICMP** | Moderate | Mostly harmless, trivially avoidable |
+| 6 | **Rogue DHCP** — SDN `dnsmasq` answering on the uplink | **Low** — requires a VNet deliberately bridged to a physical NIC | School devices take `10.30.0.x` leases and lose network. Ejection from the district network |
+| 7 | **BPDUs from a Linux bridge** | **Low** — Proxmox generates `bridge_stp off` | BPDU guard err-disables the switch port. Visible outage, and the logs name us |
+
+Items 6 and 7 stay on the list despite low likelihood because both are cheap to
+assert against and expensive to discover. That is a different argument from
+"design around them," and they should not consume design attention ahead of
+items 1 and 2.
 
 ---
 
@@ -98,6 +105,121 @@ reasoning and adds config that can drift from the recipe. Prefer the adapter.
 
 ---
 
+## Aside: what BPDU guard is, and why it is not a MAC whitelist
+
+Worth writing down because it is easy to mistake for port security, and the
+two behave nothing alike.
+
+**Spanning Tree Protocol** exists to stop layer 2 loops. Switches flood
+broadcast, so a loop between two switches melts a network in seconds. STP
+prevents that by having switches exchange **BPDUs** (Bridge Protocol Data
+Units) to elect a root bridge and block redundant paths.
+
+**BPDUs are supposed to come only from switches.** A wall jack in a classroom
+is an *access port* — an end host plugs in there, and end hosts have no
+business speaking STP. So access ports are typically configured with PortFast
+(or "edge port") to skip STP's listening/learning delay, and **BPDU guard** is
+applied alongside it.
+
+BPDU guard's entire logic is: *if a BPDU is ever received on this port, shut
+the port down.* The port goes to `err-disable`, and it stays down until an
+admin clears it or an errdisable-recovery timer expires. **One frame is
+enough.**
+
+**So it is protocol-presence detection, not identity.** There is no MAC
+whitelist, no list to be on, no RBAC, and nothing is compared against anything.
+The switch is not asking *who* sent this — it is reacting to the fact that
+this protocol appeared somewhere it must never appear. The distinction from
+what it is commonly confused with:
+
+| Mechanism | Question it asks | Basis |
+|---|---|---|
+| **BPDU guard** | "Did an STP frame arrive on an edge port?" | Protocol presence. No identity involved |
+| **Port security / sticky MAC** | "Is this MAC allowed here, and how many are there?" | MAC whitelist — genuinely identity-based |
+| **802.1X / NAC** | "Has this device authenticated?" | Credentials, closest to RBAC |
+| **Root guard** | "Did a *superior* BPDU arrive?" | Accepts BPDUs, rejects ones that would change root election |
+
+**Why it matters here, and why it is item 7 rather than item 2.** A Linux
+bridge *can* speak STP, and if it does, and there is a path to a school access
+port, the port shuts. But Proxmox generates `bridge_stp off` in
+`/etc/network/interfaces` by default, and with the one-uplink topology no VNet
+bridge has a physical path to the district at all. So the realistic exposure is
+narrow: someone enabling STP on a bridge to be "safe," or a future topology
+that plugs both the switch and a node into wall jacks — which would also create
+the physical loop STP exists to catch. The mitigation is a one-line assert that
+`bridge_stp` is off on every bridge, plus never building that topology.
+
+---
+
+## What must be allowed to broadcast
+
+Default-deny outbound is the rule, but a few things are genuinely mandatory,
+and denying them breaks the link rather than quieting it.
+
+**On the uplink, the only required broadcast is ARP.** ARP requests go to
+`ff:ff:ff:ff:ff:ff` and are unavoidable — every device on every network does
+this constantly, and no monitoring system flags it. It must be permitted.
+
+**DHCP is not required on the uplink, and should not be used.** A static
+address on the district-facing interface means the host never emits
+`DHCPDISCOVER` to `255.255.255.255`, never appears in the district's DHCP
+logs, and never depends on a lease surviving. This is the one place where
+choosing static over DHCP is a genuine isolation control rather than a
+preference — it removes an entire class of broadcast rather than filtering it.
+
+**DHCP *is* required inside lab VNets, and stays there.** The DORA exchange is
+broadcast by definition, and Phase 5's exit criterion explicitly proves
+`DHCPDISCOVER` receives `DHCPOFFER`. That traffic never reaches the uplink,
+because a `simple` zone bridge has no physical port — which is also why rogue
+DHCP is item 6 rather than item 1.
+
+Everything else — mDNS (`5353`), LLMNR, NetBIOS (`137/138`), directed
+broadcast to `255.255.255.255`, and all multicast (`224.0.0.0/4`) — is denied
+and logged on the uplink.
+
+---
+
+## Sequencing: deny before the link comes up
+
+The window between "uplink is live" and "firewall is enforcing" is the window
+in which everything above leaks. It should be zero, and it can be, because
+nothing requires the link to exist before rules are written.
+
+**Order the bootstrap so the firewall is enforcing *before* the interface is
+brought up**, rather than immediately after. Concretely:
+
+1. Write the firewall configuration with default-deny and enable it.
+2. **Assert it is active** — read the state back rather than trusting that
+   applying it worked. This repository has been bitten twice by steps that
+   passed by doing nothing.
+3. Only then bring up the uplink interface.
+4. Only then start the build and seeding work.
+
+Deny-then-connect is strictly better than connect-then-deny and costs nothing
+extra. It also means a failure to apply the firewall leaves the box offline
+rather than loud — the correct direction to fail.
+
+### Two firewall profiles, mirroring the factory/site split
+
+The build needs egress that a deployed unit must never have, so the rules are
+not the same in both states. Rather than editing one profile back and forth,
+carry two — the same shape as the existing factory/site split:
+
+| | Factory profile | Site profile |
+|---|---|---|
+| Outbound `80/443` from the package cache | Allowed | **Denied** |
+| Outbound `80/443` from template builds via `prov0` | Allowed | `prov0` does not exist |
+| Inbound Guacamole | Allowed | Allowed |
+| Everything else outbound | Denied and logged | Denied and logged |
+
+**Shipping means switching to the site profile and asserting the factory
+allows are gone** — not assuming they were removed. Pair it with the existing
+Phase 2.5 assertion that no subnet carries `snat: true`, since those two
+together are what actually make the unit air-gapped rather than merely
+configured to look that way.
+
+---
+
 ## What Proxmox emits by default
 
 Enumerated so that suppression can be checked off against it rather than
@@ -108,7 +230,7 @@ to *test against*, and the verification section below is how.
 |---|---|---|---|
 | Corosync (knet) | UDP 5405-5412, node to node | On once clustered | Bind to `vmbr1` via `ring0_addr` on the cluster subnet |
 | pmxcfs | Rides corosync | On | Same |
-| SDN `dnsmasq@<zone>` | DHCP/DNS on VNet bridges | On per zone | `interface=` / `except-interface=vmbr0`, `bind-interfaces` |
+| SDN `dnsmasq@<zone>` | DHCP/DNS on VNet bridges | On per zone | Structurally contained — a `simple` zone bridge has no physical port, so this cannot reach the uplink without a VNet being deliberately bridged to a NIC. Assert that invariant rather than configuring around it |
 | Host DHCP client | `DHCPDISCOVER` to `255.255.255.255` | If uplink is DHCP | **Static IP on the uplink.** Never DHCP |
 | `pve-daily-update.timer` | Repo + `shop.proxmox.com` | On | Disable at site, or point at the package cache |
 | `apt-daily(-upgrade).timer` | Debian repos | On | Disable at site |

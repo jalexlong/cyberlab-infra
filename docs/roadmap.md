@@ -971,12 +971,18 @@ established idiom here rather than a new one.
 
 - **Define a `svc0` VNet** alongside `prov0` in `ansible/inventory.yml`:
   `snat: false`, four characters so it clears the Proxmox 8-character limit.
-  **Watch the subnet collision.** `prov0` holds `10.30.0.0/24` and section
-  subnets are built as `10.<teacher_id>.<section_code>.0/24`, so a service
-  network at `10.31.0.0/24` collides with `teacher_id: 31`. Reserve both
-  `10.30` and `10.31` as infrastructure and assert that no `teacher_id` may
-  take those values — the kind of latent collision this document has already
-  been bitten by once in the identifier scheme.
+  `10.31.0.0/24` is safe alongside `prov0`'s `10.30.0.0/24`: section subnets
+  are `10.<teacher_id>.<section_code>.0/24` and **`teacher_id` starts at 101
+  by design**, leaving 101-255 — about 150 teachers — clear of the low octets
+  reserved for infrastructure.
+
+  **What is worth adding is a range assert on `teacher_id`**, which does not
+  exist today. `generate_runtime_artifacts.py` checks that it is an integer
+  and that it is unique, but not that it falls in 101-255. The floor is load-
+  bearing for the infrastructure subnets and the ceiling is load-bearing for
+  the network formula itself — `teacher_id: 256` produces an invalid octet,
+  the same failure mode already documented for `course_index` in Identifiers.
+  Both ends currently rest on convention.
 - **A `controller-bootstrap-package-cache.yml` playbook**, and its call in
   `install-cyberlab.sh` behind a flag defaulting the same way
   `cyberlab_sdn_build_sections` does — off until it is proven.
