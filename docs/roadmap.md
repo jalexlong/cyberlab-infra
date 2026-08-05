@@ -1210,10 +1210,10 @@ verified present; the consequence is not yet demonstrated:
 - The host holds `10.30.0.1/24` on `prov0` — confirmed.
 - **The datacenter firewall is disabled.** `cluster.fw` carries `enable: 0`
   and `pve-firewall status` reports `disabled/running`, so nothing is
-  filtering anything. There is even a `500.fw` with `enable: 1` on it that
-  does nothing, because guest rules do not apply while the datacenter firewall
-  is off — a good illustration of why the `firewall=1` flag needs asserting
-  rather than trusting.
+  filtering anything. Note that the enable flags form a hierarchy: a guest
+  `.fw` with `enable: 1` has no effect while the datacenter firewall is off,
+  which is safe now and becomes the opposite of safe the moment it is turned
+  on and guests inherit rules nobody re-read.
 
 What remains untested is only the last step: whether a lab guest can therefore
 reach the management address. Section VNets exist on no host, so there was
@@ -1355,12 +1355,14 @@ fail silently.
   students' devices can route to it. A correct IP on a segment students cannot
   reach is the second silent failure.
 - **Whether egress is permitted** — worth recording, but **not a requirement**.
-  The package cache ships seeded from the factory (see Phase 5), so a unit with
+  The package cache ships seeded from the factory (Phase 2.5), so a unit with
   no outbound path runs labs normally; egress only buys automatic host patching
   and a self-refreshing cache. Ask so the answer is recorded rather than
   assumed, and so a district that grants it gets the benefit.
-- **Switch port count available**, if the unit uplinks to district
-  infrastructure rather than carrying its own switch.
+- **One ethernet port, and where it terminates.** The unit carries its own
+  switch and does not uplink it — a single node takes the district connection
+  (see `docs/network-isolation.md`). So the ask is one port, not a port count,
+  and it is worth confirming the run reaches wherever the unit will live.
 
 ### Phase 8 — Pilot (Mar-Apr 2027)
 
@@ -1378,17 +1380,24 @@ supplement.
    still does
 2. **Test whether `snat: false` actually isolates** (Phase 5) — build one
    section VNet, attach a guest, and try to reach the Proxmox management
-   address from it. If that succeeds, isolation is a firewall project and the
-   Proxmox-firewall work moves ahead of the pod engine. Cheap to run in the
-   same lab session as item 1
-3. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
+   address from it. Expect it to succeed: as of 2026-08-05 the datacenter
+   firewall is disabled, forwarding is on, and the host holds a gateway on
+   every VNet subnet. Cheap to run in the same lab session as item 1
+3. **Pick the firewall backend and enable the datacenter firewall** (Phase 5).
+   `pve1` runs PVE 9.2.9 with both `pve-firewall` and `proxmox-firewall`
+   installed and active but neither producing rules, so this is an open
+   choice rather than an inherited one. Clear the stale `.fw` files first —
+   they reference a decommissioned VM and subnets the design no longer has,
+   and guest `enable: 1` flags start applying the moment the datacenter
+   firewall comes on. See `docs/network-isolation.md`
+4. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
    Worth doing *after* item 1, not before: the wipe-and-rebuild then doubles as
    the proof that the cache is reproducible from the installer rather than a
    hand-built artifact that happens to exist
-4. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
+5. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM — **no longer blocked** on the student-network
    question, which resolved to Model A for the pilot. Fold in the cache's
-   per-node disk once item 1 has measured it
+   per-node disk once item 1 has measured it, and the uplink node's second NIC
 
 The district-sysadmin conversation is no longer an immediate action. It
 belongs to the prebuilt SKU (Phase 7) and its question list is parked in the

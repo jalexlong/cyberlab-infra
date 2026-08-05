@@ -30,18 +30,25 @@ draft assumptions were wrong, and are corrected throughout.
 ### What this changes
 
 - **The firewall being disabled is the headline.** `pve-firewall status`
-  reports `disabled/running`. There is a `500.fw` with `enable: 1` on it, and
-  it does nothing, because guest rules do not apply while the datacenter
-  firewall is off. This is the empirical half of the `snat: false` suspicion
-  in Phase 5: forwarding is on, the host holds a gateway on every VNet subnet,
-  and **nothing is filtering**. The remaining unknown is only whether lab
-  guests can therefore reach the management address, which still needs a
-  section VNet and a guest to test.
+  reports `disabled/running`. This is the empirical half of the `snat: false`
+  suspicion in Phase 5: forwarding is on, the host holds a gateway on every
+  VNet subnet, and **nothing is filtering**. The remaining unknown is only
+  whether lab guests can therefore reach the management address, which still
+  needs a section VNet and a guest to test.
+- **Guest-level `enable: 1` does nothing while the datacenter firewall is
+  off.** `500.fw` carries it and has no effect. The enable flags are a
+  hierarchy, not independent switches, and the outermost one wins. Worth
+  stating because the failure is silent in the safe direction now — rules
+  simply do not apply — but becomes silent in the *unsafe* direction later:
+  once the datacenter firewall is enabled, every guest that was relying on
+  nothing suddenly inherits whatever its `.fw` file says.
 - **`chrony` is a live, continuous egress path right now.** It is reaching
   `2.debian.pool.ntp.org` with four sources at full reachability. Item 2 in the
   ranking below is not hypothetical on this host; it is happening.
-- **mDNS drops off the list.** `avahi-daemon` is not installed, only its
-  client libraries, so there is nothing emitting mDNS.
+- **mDNS drops down the list, not off it.** `avahi-daemon` is not installed,
+  only its client libraries, so nothing on the *host* emits mDNS. Windows lab
+  guests still will, which is why it stays in the ranking at 5 rather than
+  disappearing.
 - **BPDU risk is confirmed low.** STP is off on both bridges, as predicted.
 - **Every subnet mask in this document was wrong.** The school network is a
   `/23`. Rules below use `10.64.62.0/23`.
@@ -53,7 +60,10 @@ with the roadmap's position that the current host is a disposable
 proto-prototype:
 
 - `/etc/pve/firewall/500.fw` — VM `500` is the decommissioned
-  `farmcardscode.org` host.
+  `farmcardscode.org` host. Its `enable: 1` was a deliberate step toward
+  experimenting with the Proxmox firewall; the experimentation went to
+  OPNsense instead, so this is an abandoned starting point rather than a
+  mistake.
 - `/etc/pve/firewall/9004.fw` — a template VMID.
 - `cluster.fw` aliases `lab-net1 10.0.2.0/24` and `prod-net 10.0.1.0/24`,
   neither of which exists in the current design.
