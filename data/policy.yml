@@ -41,3 +41,18 @@ network_policy:
   gateway_host_octet: 1
   default_dhcp_start: 100
   default_dhcp_end: 199
+
+  # Both identifiers below are IP octets in the formula above, so both are
+  # bounded by 255. These are enforced by validate_inputs(); they are not
+  # documentation.
+  #
+  # teacher_id_min exists because the low octets are reserved for
+  # infrastructure subnets -- prov0 is 10.30.0.0/24 and svc0 is 10.31.0.0/24
+  # -- so teachers start at 101, leaving roughly 150 of them.
+  #
+  # section_code_max also catches the encoded scheme's own ceiling: the
+  # <course_index><day><block> composition produces codes above 255 from
+  # course_index 3 onward. See Identifiers in docs/roadmap.md.
+  teacher_id_min: 101
+  teacher_id_max: 255
+  section_code_max: 255

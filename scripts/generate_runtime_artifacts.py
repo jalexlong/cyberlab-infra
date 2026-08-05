@@ -51,6 +51,13 @@ def read_existing_students(path: Path) -> dict[tuple[str, int], dict[str, Any]]:
 
 DEFAULT_USERNAME_FORMAT = "<display_section>-<codename>-<nn>"
 
+# Fallbacks for network_policy's identifier bounds, used only when policy.yml
+# omits them. They must agree with data/policy.yml; the values live there so
+# the file is the source of truth rather than a description of one.
+DEFAULT_TEACHER_ID_MIN = 101
+DEFAULT_TEACHER_ID_MAX = 255
+DEFAULT_SECTION_CODE_MAX = 255
+
 
 def format_student_username(
     display_section: str, codename: str, ordinal: int, username_format: str
@@ -77,7 +84,13 @@ def validate_inputs(
     teachers: dict[str, Any],
     sections: dict[str, Any],
     environment_sections: dict[str, Any],
+    network_policy: dict[str, Any] | None = None,
     ) -> None:
+    policy = network_policy or {}
+    teacher_id_min = int(policy.get("teacher_id_min", DEFAULT_TEACHER_ID_MIN))
+    teacher_id_max = int(policy.get("teacher_id_max", DEFAULT_TEACHER_ID_MAX))
+    section_code_max = int(policy.get("section_code_max", DEFAULT_SECTION_CODE_MAX))
+
     teacher_ids: set[int] = set()
     # Keyed by teacher_id, not global. vmid_policy and network_policy both
     # multiply in teacher_id ahead of section_code
@@ -96,6 +109,15 @@ def validate_inputs(
             raise ValueError(f"Teacher {teacher_key} is missing integer teacher_id")
         if teacher_id in teacher_ids:
             raise ValueError(f"Duplicate teacher_id detected: {teacher_id}")
+        if not teacher_id_min <= teacher_id <= teacher_id_max:
+            raise ValueError(
+                f"Teacher {teacher_key} has teacher_id {teacher_id}, outside the "
+                f"permitted range {teacher_id_min}-{teacher_id_max}. Both bounds "
+                f"come from network_policy's formula "
+                f"10.<teacher_id>.<section_code>.0/24: the ceiling because an IP "
+                f"octet cannot exceed 255, the floor because the low octets are "
+                f"reserved for infrastructure subnets (prov0 10.30, svc0 10.31)."
+            )
         teacher_ids.add(teacher_id)
 
     for section_key, section_data in sections.items():
@@ -108,6 +130,15 @@ def validate_inputs(
         section_code = section_data.get("section_code")
         if not isinstance(section_code, int):
             raise ValueError(f"Section {section_key} is missing integer section_code")
+        if not 0 <= section_code <= section_code_max:
+            raise ValueError(
+                f"Section {section_key} has section_code {section_code}, which "
+                f"cannot be an IP octet (0-{section_code_max}) in "
+                f"network_policy's formula 10.<teacher_id>.<section_code>.0/24. "
+                f"Note that the encoded <course_index><day><block> scheme "
+                f"produces codes above 255 from course_index 3 onward -- see "
+                f"Identifiers in docs/roadmap.md."
+            )
         teacher_section_codes = section_codes_by_teacher.setdefault(teacher_id, set())
         if section_code in teacher_section_codes:
             raise ValueError(
@@ -146,7 +177,9 @@ def build_runtime_artifacts(
     sections = sections_data["sections"]
     env_sections = environment_data["environment"]["sections"]
 
-    validate_inputs(teachers, sections, env_sections)
+    validate_inputs(
+        teachers, sections, env_sections, policy_data.get("network_policy", {})
+    )
 
     username_policy = policy_data.get("username_policy", {})
     password_policy = policy_data.get("password_policy", {})

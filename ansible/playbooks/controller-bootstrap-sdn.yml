@@ -58,7 +58,18 @@
     zone_mtu: "{{ proxmox_sdn.zone.mtu }}"
 
     # Classroom networks. isolate_ports is false so students in a section can
-    # interact; snat is false so a section network has no egress at all.
+    # interact.
+    #
+    # snat is false, which prevents address translation -- it does NOT prevent
+    # reachability, and this comment used to claim it meant "no egress at all".
+    # The zone is type simple, so the host holds a gateway address on every
+    # VNet subnet, and this playbook itself asserts net.ipv4.ip_forward=1 for
+    # prov0's SNAT. A forwarding host with an address on every lab subnet and
+    # no firewall rules is a router between all of them, so section networks
+    # can very likely reach each other, prov0, and the Proxmox management
+    # address. Isolation has to come from the Proxmox firewall, not from this
+    # flag. See docs/network-isolation.md and Phase 5 in docs/roadmap.md.
+    # Suspected by inspection, not yet confirmed on hardware.
     #
     # Proxmox restricts VNet aliases to letters, digits, hyphen, underscore,
     # period and space, so section aliases are sanitised rather than passed

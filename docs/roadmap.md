@@ -4,7 +4,9 @@ Planning document for taking this repository from its current state to a
 self-contained, classroom-deployable cyber range appliance.
 
 **Written:** 2026-08-04
-**Analyzed at commit:** `5dd0092`
+**Last revised:** 2026-08-05 — student-network question resolved, package cache
+promoted to Phase 2.5, network isolation designed (`docs/network-isolation.md`)
+**Originally analyzed at commit:** `5dd0092`
 **Target:** own classroom pilot spring 2027, appliance design by summer 2027
 **Not on the critical path:** this supplements the Cyber.org curriculum.
 Nothing here blocks teaching this year.
@@ -13,7 +15,9 @@ Nothing here blocks teaching this year.
 three-course sequence. This is why `course_index`'s 3-value ceiling (see
 Identifiers) is not live pressure today, and why the template catalog and
 `data/sections.yml`'s `course_code` values should track that pathway's actual
-courses rather than a generic set.
+courses rather than a generic set. The ceiling is now *enforced* rather than
+merely documented — `section_code` above 255 is rejected by `validate_inputs()`,
+since it cannot be an IP octet.
 
 ---
 

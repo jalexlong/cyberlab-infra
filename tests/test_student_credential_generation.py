@@ -240,3 +240,67 @@ def test_one_teacher_still_cannot_reuse_a_section_code():
         pass
     else:
         raise AssertionError("Duplicate section_code for the same teacher was accepted")
+
+
+def _one_teacher(teacher_id: int, section_code: int = 213):
+    teachers = {"jlong": {"teacher_id": teacher_id, "sections": ["jlong-a"]}}
+    sections = {
+        "jlong-a": {
+            "teacher": "jlong",
+            "section_code": section_code,
+            "student_count": 3,
+        }
+    }
+    return teachers, sections, {"jlong-a": {}}
+
+
+def test_teacher_id_and_section_code_are_bounded_to_an_octet():
+    """Both identifiers are IP octets in network_policy's formula
+    `10.<teacher_id>.<section_code>.0/24`, so both are bounded by 255.
+    Nothing enforced that: validate_inputs checked type and uniqueness only,
+    so teacher_id 300 or section_code 311 produced an unbuildable subnet with
+    no complaint at generation time.
+
+    The floor matters too. Low octets are reserved for infrastructure subnets
+    (prov0 10.30.0.0/24, svc0 10.31.0.0/24), which is why teachers start at
+    101 -- a teacher_id of 31 would collide with the service network.
+    """
+    for bad_id in (31, 100, 256, 300, 0, -1):
+        try:
+            validate_inputs(*_one_teacher(bad_id))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Out-of-range teacher_id {bad_id} was accepted")
+
+    for bad_code in (256, 311, -1):
+        try:
+            validate_inputs(*_one_teacher(101, bad_code))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Out-of-range section_code {bad_code} was accepted")
+
+    # The bounds themselves, and the real values in data/, must still pass.
+    validate_inputs(*_one_teacher(101, 0))
+    validate_inputs(*_one_teacher(255, 255))
+
+
+def test_identifier_bounds_come_from_policy_not_from_code():
+    """policy.yml is the source of truth for these bounds. An earlier defect in
+    this repository had username_policy loaded and then discarded because
+    format_student_username hardcoded the same pattern, so editing the
+    source-of-truth file changed nothing. Passing a narrowed policy must
+    actually narrow validation, or these bounds have the same problem.
+    """
+    narrow = {"teacher_id_min": 200, "teacher_id_max": 210, "section_code_max": 99}
+
+    # Accepted by the defaults, must be rejected by the narrowed policy.
+    try:
+        validate_inputs(*_one_teacher(101, 213), narrow)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("network_policy bounds were ignored by validate_inputs")
+
+    validate_inputs(*_one_teacher(205, 98), narrow)  # must not raise

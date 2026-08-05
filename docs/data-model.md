@@ -331,6 +331,18 @@ Default DHCP range:
 * start: `.100`
 * end: `.199`
 
+### Identifier bounds
+
+Both `teacher_id` and `section_code` are IP octets in the formula above, so both are bounded. The values live in `network_policy` in `data/policy.yml` and are enforced by `validate_inputs()` in `scripts/generate_runtime_artifacts.py` — they are not documentation.
+
+| Bound | Value | Why |
+|---|---|---|
+| `teacher_id_min` | `101` | Low octets are reserved for infrastructure subnets — `prov0` is `10.30.0.0/24` and `svc0` is `10.31.0.0/24`. Starting at 101 leaves roughly 150 teachers |
+| `teacher_id_max` | `255` | An IP octet cannot exceed 255 |
+| `section_code_max` | `255` | Same. This also catches the encoded scheme's own ceiling: the `<course_index><day><block>` composition produces codes above 255 from `course_index` 3 onward — see Identifiers in `docs/roadmap.md` |
+
+Before this was enforced, `validate_inputs()` checked `teacher_id` for integer type and uniqueness only, so a value of `300` produced an unbuildable subnet with no complaint at generation time.
+
 ### Why `/24`
 
 The platform intentionally uses `/24` section networks for readability and classroom simplicity rather than maximum address efficiency.

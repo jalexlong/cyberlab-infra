@@ -156,6 +156,7 @@ cyberlab-infra/
 │   ├── bootstrap-checklist.md
 │   ├── controller-lxc.md
 │   ├── data-model.md
+│   ├── network-isolation.md    # egress suppression and firewall design
 │   ├── platform-pipeline.md
 │   ├── recovery.md
 │   ├── template-lifecycle.md
