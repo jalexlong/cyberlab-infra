@@ -163,7 +163,31 @@ record token-list pveum user token list --output-format json
 log "Recording SDN"
 record sdn-zones pvesh get /cluster/sdn/zones --output-format json
 record sdn-vnets pvesh get /cluster/sdn/vnets --output-format json
-record sdn-subnets pvesh get /cluster/sdn/subnets --output-format json
+
+# Subnets are addressed per VNet. There is no /cluster/sdn/subnets collection
+# endpoint: asking for one returns "No 'get' handler defined" and the capture
+# silently keeps that error string in place of every gateway, DHCP range and
+# SNAT flag — exactly the facts a rebuild needs and nobody remembers.
+record_sdn_subnets() {
+  local out="${DEST}/facts/sdn-subnets.txt"
+  local vnets vnet
+  vnets="$(pvesh get /cluster/sdn/vnets --output-format json 2>/dev/null |
+    grep -oE '"vnet":"[^"]*"' | cut -d'"' -f4 | sort -u)" || true
+  if [[ -z "${vnets}" ]]; then
+    printf 'no vnets defined\n' >"${out}"
+    log "  recorded sdn-subnets (none)"
+    return 0
+  fi
+  : >"${out}"
+  for vnet in ${vnets}; do
+    printf '### vnet: %s\n' "${vnet}" >>"${out}"
+    pvesh get "/cluster/sdn/vnets/${vnet}/subnets" --output-format json >>"${out}" 2>&1 ||
+      warn "  sdn-subnets for ${vnet} failed or unavailable"
+    printf '\n' >>"${out}"
+  done
+  log "  recorded sdn-subnets"
+}
+record_sdn_subnets
 
 # Hardware inventory. Directly useful to the Phase 3 BOM work: this is a
 # ground-truth record of what the box actually contains.
