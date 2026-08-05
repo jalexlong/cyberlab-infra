@@ -9,9 +9,12 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# Declared and assigned separately so that `set -e` still sees a failing
+# substitution; `readonly X="$(cmd)"` returns readonly's status, not cmd's.
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+readonly SCRIPT_NAME SCRIPT_DIR REPO_ROOT
 
 DEFAULT_GENERATED_DIR="${REPO_ROOT}/private/generated"
 DEFAULT_OUTPUT_FILE="${DEFAULT_GENERATED_DIR}/controller-network.yml"

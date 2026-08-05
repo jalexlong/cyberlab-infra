@@ -1,3 +1,4 @@
+---
 - name: Bootstrap Proxmox host for Cyberlab
   hosts: proxmox_hosts
   gather_facts: false
@@ -854,4 +855,3 @@
           - "Controller CTID: {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}"
           - "Controller hostname: {{ bootstrap_policy.bootstrap.controller_lxc.hostname }}"
           - "Controller status: {{ controller_status.stdout }}"
-

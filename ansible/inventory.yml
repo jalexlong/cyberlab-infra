@@ -1,3 +1,4 @@
+---
 all:
   vars:
     proxmox_sdn:

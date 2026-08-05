@@ -1,3 +1,4 @@
+---
 - name: Create Proxmox ACLs
   hosts: localhost
   connection: local

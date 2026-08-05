@@ -126,4 +126,3 @@
           - "Release: {{ proxmox_version_response.json.data.release }}"
           - "Repo ID: {{ proxmox_version_response.json.data.repoid }}"
           - "Privileges at '/': {{ proxmox_root_privs | length }} granted"
-

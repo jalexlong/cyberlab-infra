@@ -208,4 +208,3 @@ templates:
     boot: order=scsi0
     description: "Cyberlab Metasploitable 2 base template"
     tags: "template;metasploitable2;legacy;base"
-

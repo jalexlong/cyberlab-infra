@@ -1,0 +1,20 @@
+# Tooling for local checks and CI. Not needed on the controller or the host.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/ansible-galaxy collection install -r ansible/requirements.yml
+#
+# Then run the same checks CI runs:
+#
+#   .venv/bin/yamllint ansible/ data/
+#   .venv/bin/ansible-lint --offline ansible/
+#   .venv/bin/ruff check scripts/
+#   .venv/bin/python -m pytest tests/
+#
+# Versions are floors, not pins. CI installs fresh, so a tool release that
+# introduces a new rule will surface here rather than in a hardware run.
+ansible-lint>=25.0.0
+pytest>=8.0.0
+PyYAML>=6.0
+ruff>=0.6.0
+yamllint>=1.35.0

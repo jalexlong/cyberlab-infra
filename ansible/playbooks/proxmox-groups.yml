@@ -1,3 +1,4 @@
+---
 - name: Create Proxmox groups
   hosts: localhost
   connection: local
@@ -31,4 +32,3 @@
       community.proxmox.proxmox_group:
         groupid: "grp-teachers"
         state: present
-

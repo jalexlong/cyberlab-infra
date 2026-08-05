@@ -1,0 +1,27 @@
+---
+# Starting profile. The repo passes `basic` with the deferrals below; the
+# intent is to retire entries from skip_list one at a time rather than to keep
+# them forever. Raising the profile to `moderate` is a later goal.
+profile: basic
+
+exclude_paths:
+  - .venv/
+  - .github/
+
+# Each of these is a real improvement that is deliberately deferred, because
+# fixing them means editing playbooks that are currently the only tested path
+# to a working host and cannot be re-validated without Proxmox hardware.
+# Retire them one rule at a time, each with a hardware run behind it.
+skip_list:
+  # 29 hits. Bare `command`/`shell`/`set_fact` rather than ansible.builtin.*.
+  # Mechanical, but it touches nearly every playbook at once.
+  - fqcn
+  # 25 hits. Several are genuine idempotency bugs and several are correct
+  # as-written (pveum reconcile tasks that really do change state every run).
+  # Needs task-by-task judgement, not a blanket fix.
+  - no-changed-when
+  # 9 hits. Adding `set -o pipefail` changes failure semantics of shell tasks
+  # that currently tolerate a failing pipe stage. Needs a hardware run.
+  - risky-shell-pipe
+  # 5 hits. Task/play name casing only.
+  - name

@@ -1,3 +1,4 @@
+---
 - name: Enroll VMs into Proxmox pools
   hosts: localhost
   connection: local

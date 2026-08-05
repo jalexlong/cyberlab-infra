@@ -9,8 +9,11 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# Declared and assigned separately so that `set -e` still sees a failing
+# substitution; `readonly X="$(cmd)"` returns readonly's status, not cmd's.
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_NAME SCRIPT_DIR
 
 readonly REPO_DIR_DEFAULT="/root/cyberlab-infra"
 readonly ANSIBLE_DIR_REL="ansible"

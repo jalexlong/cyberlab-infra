@@ -16,32 +16,47 @@ A change is not considered fully validated until the relevant live runtime check
 
 ### Level 1: Static checks
 
-Static checks verify that shell scripts and YAML files are syntactically valid.
+Static checks verify that shell scripts and YAML files are syntactically valid,
+that the linters are satisfied, and that the repository's internal invariants
+still hold.
 
-These checks can be run from a normal development laptop.
+These checks run from a normal development laptop, and are exactly what CI runs
+on every push and pull request (`.github/workflows/ci.yml`).
 
-Examples:
+Set up once:
 
 ```bash
-bash -n scripts/*.sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/ansible-galaxy collection install -r ansible/requirements.yml
 ```
+
+Then run the full set:
 
 ```bash
-python3 - <<'PY'
-import yaml
-from pathlib import Path
-
-paths = [
-    *Path("ansible/vars").glob("*.yml"),
-    *Path("data").glob("*.yml"),
-]
-
-for path in paths:
-    with path.open() as f:
-        yaml.safe_load(f)
-    print(f"ok: {path}")
-PY
+.venv/bin/yamllint ansible/ data/ .github/
+.venv/bin/ansible-lint --offline ansible/
+.venv/bin/ruff check scripts/
+shellcheck --severity=warning scripts/*.sh
+.venv/bin/python -m pytest tests/
 ```
+
+Installing the `community.proxmox` collection is not optional for
+`ansible-lint`: without it, `--syntax-check` cannot resolve the
+`module_defaults` group and every playbook using the collection reports
+`internal-error` instead of being checked.
+
+`tests/` reads the repository as data — it never contacts Proxmox. It covers
+what parse-level checks structurally cannot:
+
+- each of the four Phase 0 defects, so reintroducing one turns CI red
+- playbooks targeting a group or host absent from `inventory.yml` (a playbook
+  aimed at a nonexistent group runs zero tasks and **exits successfully**)
+- `vars_files` and `import_playbook` paths that do not resolve
+- agreement between `automation_role_privs` in `host-bootstrap.yml` and
+  `required_proxmox_privs` in `controller-validate-proxmox-api.yml`, which are
+  independent declarations that must match
+- slots in `data/slots.yml` naming templates absent from the catalog
 
 Static checks do not prove that Proxmox operations work.
 

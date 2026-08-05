@@ -101,11 +101,14 @@ a validation that fails. Worth a CI check in Phase 1.
 
 - **Per-section VNets are never created.** Only `prov0` exists.
 - **No egress control** on classroom networks.
-- **No CI.** `--syntax-check` and `bash -n` both pass on everything, so
-  parse-level checks would not have caught any of the four defects above.
 - **OpenTofu files still empty** — see decision below.
 - **Phase 0 exit remains unproven.** The fixes are correct by inspection but
   have not been run against live Proxmox hardware.
+- **ansible-lint runs at `basic` with four rules deferred** (`fqcn`,
+  `no-changed-when`, `risky-shell-pipe`, `name` — 68 findings). Each is a real
+  improvement, but fixing them edits the only currently-tested path to a
+  working host, so each should be retired with a hardware run behind it. See
+  `.ansible-lint`.
 
 ---
 
@@ -378,13 +381,39 @@ only. Until this runs on live Proxmox, Phase 0 is not closed.
 **Exit:** two consecutive clean `install-cyberlab.sh` runs on a wiped host;
 API token demonstrably performs a privileged action.
 
-### Phase 1 — CI (Sep 2026)
+### Phase 1 — CI (Sep 2026) — done
 
-`yamllint`, `ansible-lint`, `shellcheck`, `pytest`. Checks for undefined
-variables and playbooks targeting hosts absent from inventory — both classes
-of defect exist in the repo today.
+`.github/workflows/ci.yml` runs `yamllint`, `ansible-lint`, `ruff`,
+`shellcheck`, and `pytest` on every push and pull request. Configuration lives
+in `.yamllint`, `.ansible-lint`, and `pyproject.toml`; tooling in
+`requirements-dev.txt`. `docs/testing.md` Level 1 documents running the same
+set locally.
 
-**Exit:** CI green; reintroducing any Phase 0 defect turns it red.
+**Exit met.** Each of the four Phase 0 defects was reintroduced on a scratch
+copy and confirmed to turn the suite red, as were three structural regressions
+(privilege drift, a playbook targeting an absent host, a wrapper importing a
+missing playbook). Passing tests alone would not have demonstrated this.
+
+Two classes of defect predicted by the original analysis were found and fixed
+while building this:
+
+- **`proxmox-sdn.yml` targeted `hosts: poseidon`**, absent from inventory.
+  Both `--syntax-check` and `bash -n` passed on it. This is the worst failure
+  mode available: a play aimed at a nonexistent group runs zero tasks and exits
+  zero. Retargeted to `proxmox_targets`.
+- **`policy.yml`'s `username_policy` was loaded and discarded** —
+  `format_student_username` hardcoded the same pattern, so editing the
+  source-of-truth file changed nothing. Now consumed, matching how
+  `password_policy` and `pool_policy` already worked.
+
+Also fixed: five `SC2155` warnings where `readonly X="$(cmd)"` masked the
+substitution's exit status under `set -Eeuo pipefail`, defeating the scripts'
+own error handling.
+
+Note that `ruff` — not `pytest` — is what guards defect 4. `raiseValueError(…)`
+is syntactically valid, so `py_compile` accepts it; `F821` (undefined name)
+rejects it. The `select` list in `pyproject.toml` is pinned explicitly so a
+ruff upgrade cannot silently change what CI enforces.
 
 ### Phase 2 — Factory template pipeline (Oct 2026)
 
@@ -525,6 +554,5 @@ supplement.
 1. Resolve the student-network question with a district sysadmin — it gates
    the BOM
 2. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0
-3. Stand up CI
 4. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM

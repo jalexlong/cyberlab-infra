@@ -1,5 +1,6 @@
+---
 - name: Create Proxmox SDN zone and VNet
-  hosts: poseidon
+  hosts: proxmox_targets
   gather_facts: false
   vars_files:
     - ../group_vars/all.yml

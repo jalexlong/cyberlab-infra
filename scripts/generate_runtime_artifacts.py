@@ -41,8 +41,17 @@ def read_existing_students(path: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
-def format_student_username(display_section: str, codename: str, ordinal: int) -> str:
-    return f"{display_section}-{codename}-{ordinal:02d}"
+DEFAULT_USERNAME_FORMAT = "<display_section>-<codename>-<nn>"
+
+
+def format_student_username(
+    display_section: str, codename: str, ordinal: int, username_format: str
+) -> str:
+    return (
+        username_format.replace("<display_section>", display_section)
+        .replace("<codename>", codename)
+        .replace("<nn>", f"{ordinal:02d}")
+    )
 
 
 def generate_password(rng: random.Random, words1: list[str], words2: list[str]) -> str:
@@ -112,6 +121,8 @@ def build_runtime_artifacts(
     password_policy = policy_data.get("password_policy", {})
     pool_policy = policy_data.get("pool_policy", {})
 
+    username_format = str(username_policy.get("format", DEFAULT_USERNAME_FORMAT))
+
     # NOTE: Replace these with larger curated wordlists later.
     codenames = [
            "raven", "otter", "maple", "ember", "falcon", "cedar", "harbor", "comet",
@@ -159,7 +170,9 @@ def build_runtime_artifacts(
         for idx in range(student_count):
             ordinal = idx + 1
             codename = codenames[idx]
-            username = format_student_username(display_section, codename, ordinal)
+            username = format_student_username(
+                display_section, codename, ordinal, username_format
+            )
 
             if username in used_usernames:
                 raise ValueError(f"Duplicate generated username detected: {username}")

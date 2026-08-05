@@ -1,0 +1,25 @@
+---
+extends: default
+
+ignore: |
+  .venv/
+
+rules:
+  # Ansible with inline Jinja produces legitimately long lines — nested filter
+  # chains and the long fail_msg strings the platform relies on for operator
+  # diagnostics. A column limit here would only force awkward wrapping inside
+  # template expressions, which is harder to read, not easier.
+  line-length: disable
+
+  # The settings below are not preferences: ansible-lint runs yamllint with its
+  # own required configuration and warns if this file disagrees. Keeping them
+  # aligned means `yamllint` and `ansible-lint` cannot report conflicting
+  # results on the same file.
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: false
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

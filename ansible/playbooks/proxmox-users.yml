@@ -1,3 +1,4 @@
+---
 - name: Create Proxmox users with pveum
   hosts: pve1
   gather_facts: false
@@ -58,4 +59,3 @@
       args:
         executable: /bin/bash
       loop: "{{ generated_students.teachers | default([]) }}"
-
