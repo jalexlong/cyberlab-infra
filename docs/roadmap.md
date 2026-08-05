@@ -728,10 +728,11 @@ reach. Compare the alternatives — no packages at all is pedagogically
 crippling, and giving lab VNets SNAT gives up the isolation guarantee
 entirely.
 
-**VMID `801` is already reserved for it** — "future apt-cache or package
-mirror service" in `data/bootstrap-policy.yml` and `docs/platform-pipeline.md`.
-The slot was allocated before the service was designed; this section is what
-fills it.
+**A VMID was already reserved for it** — `801`, as "future apt-cache or
+package mirror service", allocated before the service was designed. Designing
+it showed one ID was not enough, since VMIDs are cluster-unique and the cache
+is per-node; `data/bootstrap-policy.yml` and `docs/platform-pipeline.md` now
+reserve `801-805`. **Phase 2.5 builds it.**
 
 Two things to settle when it is built:
 
