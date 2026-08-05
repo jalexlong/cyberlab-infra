@@ -427,6 +427,47 @@ while `icsa1` has 24 and `itsb3` has 30, already overflowing.
 names and Proxmox tags; move VMIDs to a pool allocator when the pod engine is
 built anyway.
 
+**2026-08-05 — three more concrete defects found in the encoding, and the
+"convenient later" allocator is now the decided direction, not just an
+option.** `section_code` is `<course_index><day><block>` — undocumented as a
+composition, but recoverable from `data/sections.yml`: `its=1, cyb=2`,
+`A=1, B=2`. That composition breaks in three ways:
+
+- **A leading zero is already lost.** `icsa1` (course index 0) stores
+  `section_code: 11`, but `docs/data-model.md` documents the VMID formula as
+  "next three digits: section code." `t101c011` (the VNet name) pads it back;
+  `10.101.11.0/24` (the subnet, from the network formula) does not. The
+  identifier is stored in a form that cannot represent its own scheme.
+- **A hard ceiling of three course types.** Course index 3 produces codes
+  `3xx`, which exceeds 255 and is not a valid IP octet. The fourth distinct
+  course a teacher runs breaks subnet generation.
+- **The encoding is teacher-independent, but a validator demanded global
+  uniqueness.** Two teachers teaching the same course in the same block —
+  an ordinary timetable — produce the same `section_code` and were rejected,
+  even though both the VMID and network formulas already multiply in
+  `teacher_id` ahead of it, so nothing would actually have collided. Fixed as
+  a stopgap in `generate_runtime_artifacts.py`: the uniqueness check is now
+  scoped to `(teacher_id, section_code)`, matching what the formulas actually
+  require. This does not fix the leading-zero or ceiling defects, and is not
+  the redesign below — it only stops the current encoding from rejecting
+  valid input while it is still in use.
+
+**Decided: stop encoding `section_code`, allocate it sequentially instead.**
+Course/day/block stay as the separate, already-readable fields they are in
+`sections.yml` (`course_code`, `day`, `block`); `section_code` becomes an
+opaque integer assigned as each section is created, from a per-teacher range.
+This removes all three defects at once — no leading zeros, no octet ceiling,
+no cross-teacher collision — without changing the VMID or network formulas
+themselves, since both already treat `section_code` as an opaque number.
+
+**Not implemented yet, and deliberately so.** `data/environments/school-lab.yml`'s
+VNet names and subnets are hand-authored to match the current encoded values;
+nothing today derives them from `section_code` programmatically. Renumbering
+now means hand-recomputing four subnets with no generator to keep them
+honest — exactly the kind of one-off allocation this decision exists to stop
+doing by hand. It belongs with the pod-engine's actual allocator (Phase 4),
+built once rather than twice.
+
 ### Access control
 
 Proxmox's per-student user/pool/ACL model is retired. It cannot express
@@ -446,6 +487,47 @@ removes them. A student sees only what the control plane created for them.
 Retire for students: `proxmox-users.yml`, `proxmox-pools.yml`,
 `proxmox-acls.yml`, `proxmox-pool-membership.yml`. Keep Proxmox RBAC for the
 teacher/admin account only.
+
+#### Guacamole connection-group hierarchy — decided: teacher > section > student
+
+Three levels, mirroring the data model exactly:
+
+- **Teacher** — top-level connection group per teacher.
+- **Section** — one connection group per section beneath its teacher. A user
+  group holds that section's students; the teacher gets read access to it,
+  which is how a teacher sees only their own sections without per-connection
+  grants.
+- **Student** — connections named by slot alone (`atk`, `win`, `srv`, …), not
+  by the full VM name. Guacamole's JDBC schema requires connection name
+  uniqueness only within a parent group, not globally, so nesting buys back
+  the short names that a flat namespace would force into something like
+  `jlong-cyba3-heron-47-atk`.
+
+`guacamole_entity` **is** globally unique on `(name, type)` — usernames, unlike
+connection names, are a single flat namespace across the whole deployment.
+That constraint is what the username decision below satisfies.
+
+#### Student usernames — decided: section prefix kept, codename randomised, mapping never stored here
+
+Format stays `<display_section>-<codename>-<nn>`, e.g. `cyba3-heron-47`.
+
+- **Section prefix kept, deliberately.** It costs a small amount of
+  anonymity — a dropped credential slip narrows to one class rather than the
+  whole school — in exchange for simplifying what a teacher has to know to
+  fix a problem: which section a broken pod belongs to, without a lookup.
+  That trade favors the person who has to act on the information day to day.
+- **Codename is drawn uniformly at random**, not assigned positionally, and
+  is never seeded from data that is itself committed to git (`teacher_id`,
+  `section_code`). Fixed 2026-08-05 — see "Student identity boundary" in
+  `docs/data-model.md` and `tests/test_student_credential_generation.py` for
+  what was wrong and how it is now guarded.
+- **The mapping from username to real student is never held by this system,
+  at any stage.** A teacher who needs to know who holds `cyba3-heron-47`
+  keeps that association in their own gradebook or the school's SIS — a
+  system that already carries student records under the school's own
+  compliance obligations. This appliance does not become that system.
+  Enforced by `tests/test_no_student_pii.py`, which runs in CI on every push
+  and PR.
 
 #### Identity provider is deferred, not designed out
 

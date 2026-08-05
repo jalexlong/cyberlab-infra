@@ -301,7 +301,12 @@ They should not become separate platform variants.
 
 ### No student PII in git
 
-Student identities are generated at runtime and stored only in `private/` artifacts.
+This system never knows who a student is. The only student-related input
+anywhere is `student_count`, an integer; pseudonymous usernames and passwords
+are generated from it and stored only under `private/`, which is
+git-ignored. The mapping between a generated username and a real student is
+never held here at any stage — see "Student identity boundary" in
+`docs/data-model.md` for the full commitment and how it is enforced.
 
 This repo does not store:
 
@@ -310,6 +315,10 @@ This repo does not store:
 - student SIS IDs
 - committed passwords
 - committed private roster mappings
+
+`tests/test_no_student_pii.py` enforces this in CI on every push and PR: it
+scans tracked data for PII-shaped keys, allowlists what `sections.yml` may
+contain, and confirms nothing under `private/` is ever tracked by git.
 
 ### Teacher-owned section instances
 

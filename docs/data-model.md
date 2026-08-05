@@ -381,11 +381,37 @@ Current policy:
 * student pool: `stu-<username>`
 * teacher shared pool: from `sections.<section>.proxmox.shared_pool`
 
+## Student identity boundary
+
+**This system never knows who a student is.** The only student-related input
+anywhere in the pipeline is `sections.<section>.student_count` — an integer.
+No name, email, ID, or roster ever enters `data/`, `generate_runtime_artifacts.py`,
+or any generated artifact. Students exist to this platform only as ordinals
+(`student_index: 0, 1, 2, ...`).
+
+**The mapping between a real student and a generated username is never held
+here, at any stage, by design.** A teacher who needs to know which physical
+student holds `cyba3-heron-47` keeps that association in their own gradebook
+or the school's SIS — a system that already carries student records under the
+school's own compliance obligations (FERPA and equivalent). This appliance is
+not that system and must never become it. Handing out printed credential
+slips without recording who received which slip is the expected model; if a
+teacher chooses to record the association, that record belongs in their own
+tools, never in this repository or in `private/generated/`.
+
+This boundary is enforced, not just documented: `tests/test_no_student_pii.py`
+recursively scans every tracked file under `data/` for PII-shaped keys
+(`students`, `first_name`, `student_email`, and similar), enforces an explicit
+key allowlist on `sections.yml` so a roster-shaped addition cannot land
+silently, and confirms nothing under `private/` — where generated credentials
+live — is ever tracked by git. All three run in CI on every push and PR.
+
 ## Runtime-generated artifacts
 
 The following data is generated at runtime and must not be committed:
 
 * pseudonymous student usernames
+* the codename each username is built from
 * initial passwords
 * per-student pool assignments
 * printable student credential exports
@@ -393,15 +419,30 @@ The following data is generated at runtime and must not be committed:
 
 These should live under `private/`.
 
+Both the codename and the password are drawn from `random.SystemRandom()`,
+not from a seed derived from `teacher_id` or `section_code` — both of those
+are stored in `data/teachers.yml` and `data/sections.yml`, which are
+committed. A seed built from committed data is exactly as guessable as the
+value it produces; this was a real defect (a previous version of
+`generate_runtime_artifacts.py` made every student's initial password
+recomputable from `data/` alone) and is now guarded by
+`tests/test_student_credential_generation.py`.
+
+Assignment is randomised once and then persisted, keyed by `(section,
+student_index)`, so re-running the generator never changes a username or
+password a student has already been handed. Only genuinely new roster slots —
+a section growing, a new section added — get a fresh draw.
+
 ### Example runtime student record
 
 ```yaml
 students:
-  - username: "cyba3-raven-01"
+  - username: "cyba3-heron-47"
+    codename: "heron"
     section: "jlong-cyba3"
     student_index: 0
-    proxmox_pool: "stu-cyba3-raven-01"
-    initial_password: "MapleRiver42"
+    proxmox_pool: "stu-cyba3-heron-47"
+    initial_password: "CopperField31"
 ```
 
 ## Authoritative vs derived data
