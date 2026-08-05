@@ -277,6 +277,7 @@ is air-gapping, not wiping.
 | Right-size `slots.yml` from those measurements | See the RAM budget section — currently ~22.5 GB/student | Phase 3/4 |
 | Validate the template pipeline end to end offline | prepare → finalize → promote → validate, plus a deliberately broken image failing the gate | Phase 2 |
 | Build and seed the `apt-cacher-ng` LXCs, then install a package with the uplink unplugged | Needs a real host, a real template build to warm it, and a cable to physically pull — none of which exist on a laptop | Phase 2.5 |
+| Capture on the uplink for a full class period and confirm only ARP and the Guacamole port appear | The whole egress-suppression design is unverified until something watches the wire. See `docs/network-isolation.md` | Phase 5 |
 | Noise under load, power draw on one circuit, thermals | Product requirements, not nice-to-haves | Phase 3 |
 
 Laptop-doable items that came out of the same work, for contrast: the
@@ -1075,14 +1076,27 @@ M75q Gen2.
 
 #### Switch
 
-3-5 nodes plus a teacher console plus an uplink to the wall port is 5-7 ports
-before adding slack — **8-port unmanaged** over 5-port. (The WAP that would
-have taken a port is not in BOM v1; see the student-network section.) Pod affinity keeps VM traffic node-local by design, so the
-switch only ever carries corosync heartbeat, template sync, and
-management/Guacamole traffic: gigabit unmanaged is plenty. Keep it dumb on
-purpose — zero config is consistent with "reproducible from the public
-recipe," and a managed switch is one more thing to document and one more
-thing that can drift from the recipe.
+3-5 nodes plus a teacher console is 4-6 ports before adding slack — **8-port
+unmanaged** over 5-port. (The WAP that would have taken a port is not in BOM
+v1; see the student-network section.) Pod affinity keeps VM traffic node-local
+by design, so the switch only ever carries corosync heartbeat, template sync,
+and node management: gigabit unmanaged is plenty. Keep it dumb on purpose —
+zero config is consistent with "reproducible from the public recipe," and a
+managed switch is one more thing to document and one more thing that can drift
+from the recipe.
+
+**Revised 2026-08-05: the switch is not uplinked to the district.** An
+unmanaged switch floods broadcast and multicast to every port, so uplinking it
+puts ARP, mDNS, DHCP and any BPDUs onto the school network where no host
+firewall can filter them — layer 3 rules never see layer 2 leave. Instead
+**one node carries the district uplink on a second NIC**, and the switch stays
+a closed cluster network with no physical path off the cart. See
+`docs/network-isolation.md`.
+
+BOM consequence: one USB3 gigabit adapter for the uplink node, or a candidate
+model that takes an internal second NIC (verify per model; prefer internal).
+One adapter for the cluster, not one per node. The port count above already
+assumes no uplink port is consumed.
 
 #### Rack
 
@@ -1125,6 +1139,15 @@ Create per-section and per-pod VNets. No egress from lab networks — not the
 internet, not the district LAN, not the Proxmox management network. Prove
 isolation with a test that runs on every deploy. Prove DHCPDISCOVER receives
 DHCPOFFER.
+
+**`docs/network-isolation.md` holds the concrete rule set** — the Proxmox
+firewall blocks, sysctl hardening, service suppression, and the verification
+procedure. It covers a second requirement beyond keeping students contained:
+keeping the *cluster itself* quiet on the school network, so that corosync
+heartbeat, mDNS, BPDUs, DHCP broadcast, subscription checks and NTP pool
+lookups never reach a district sysadmin's monitoring. The headline decision
+there is topological rather than a rule — **the switch is not uplinked; one
+node is** — because layer 2 noise cannot be filtered by a layer 3 firewall.
 
 **The access LXC is the one deliberate exception and must be designed as one.**
 Guacamole has to reach every guest to broker consoles, so it holds an interface
