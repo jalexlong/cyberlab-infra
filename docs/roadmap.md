@@ -194,13 +194,13 @@ Three cautions survive the pivot:
   trade for a development host. It makes the destination credential-bearing,
   and it means rotating credentials *after* any actual restore. A district
   deployment should use `--no-secrets` instead.
-- **`pve2` is no longer fully disposable.** It holds the only rollback path for
-  the decommissioned `www.farmcardscode.org` — VM `500`, its snapshot
-  `pre-decommission-20260805`, and a capture of the Cloudflare tunnel
-  credentials and `farmcardscode.env`, none of which exist in the site's GitHub
-  repo. All of it lives on `pve2` itself. **Wiping `pve2` without first copying
-  those off destroys the ability to bring the site back.** See
-  `docs/bootstrap-checklist.md`.
+- **`pve2` briefly held the only rollback path for the decommissioned
+  `www.farmcardscode.org`** — the Cloudflare tunnel credentials and
+  `farmcardscode.env` exist in no repository. **Resolved 2026-08-05:** a full
+  `vzdump` of VM `500` and the capture were archived to USB and to the laptop,
+  and verified from a second machine. Both hosts are disposable again. See
+  `docs/bootstrap-checklist.md` before assuming that stays true — anything
+  created on these hosts and nowhere else re-earns this caution.
 
 Suggested order for the first session after the wipe: capture and verify, then
 wipe, then the Phase 0 run twice — because a clean install on a genuinely

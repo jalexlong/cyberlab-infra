@@ -114,26 +114,52 @@ umount /mnt/usb
 Then fill in the Required Inputs above **from the capture**, not from memory,
 and proceed to Phase 0A.
 
-## Captures currently on the hosts (2026-08-05)
+## Captures of the 2026-08-05 teardown
 
-Taken before the SDN teardown. Both are **still on the hosts they describe**,
-which does not satisfy the rule above — they have not been verified from a
-second machine, and a wipe would take the capture with it.
+Taken before all SDN was removed, then archived off both hosts. **The hosts are
+now wipeable** — nothing below depends on them surviving.
 
-| Host | Path | Size |
+Each capture exists in three places: on the host under `/root/`, on a USB stick
+written from that host, and on the laptop under `~/cyberlab-captures/20260805/`.
+Only the last two survive a wipe.
+
+| Host | USB contents | Size |
 |---|---|---|
-| `pve1` (10.64.62.200) | `/root/cyberlab-capture-pre-sdn-teardown` | ~668 KB |
-| `pve2` (10.64.62.201) | `/root/cyberlab-capture-pve2-pre-sdn-teardown` | ~60 KB |
+| `pve1` | `cyberlab-capture-pre-sdn-teardown.tar.gz` | 35 KB |
+| `pve2` | `cyberlab-capture-pve2-pre-sdn-teardown.tar.gz` | 3.3 KB |
+| `pve2` | `vzdump-qemu-500-2026_08_05-*.vma.zst` | 702 MB |
 
-Both include `/etc/pve/priv/`, so both are credential-bearing.
+Archived as `tar.gz` rather than copied as directory trees because the sticks
+are vfat, which cannot hold Unix ownership or mode bits — and `/etc/pve/priv/`
+is captured, so those bits matter. Each stick carries a `README.txt` and a
+`SHA256SUMS`.
 
-**`pve2`'s capture is not replaceable.** Under `www-farmcardscode/` it holds
-the Cloudflare tunnel credentials (`cert.pem`, the tunnel JSON, `config.yml`)
-and `/etc/farmcardscode.env` for the decommissioned `www.farmcardscode.org`.
-None of that is in the site's GitHub repo — the repo has the application, not
-its deployment identity. Together with VM `500`'s snapshot
-`pre-decommission-20260805`, also on `pve2`, it is the only path back to a
-running site. Copy it off before `pve2` is wiped.
+**Both sticks and the laptop copy are credential-bearing.** They hold
+`/etc/pve/priv/` — API token secrets, `pve-root-ca.key`, `shadow.cfg`. Store
+them like keys, and rotate credentials after any actual restore.
+
+Verified by reading back **from the sticks** on a second machine: checksums
+match, the archives extract, and the Required Inputs above are all present —
+storage names, the `vmbr0` address, VMIDs in use, and the SDN zone name.
+
+### The website is backed up, not just its config
+
+`pve2`'s capture holds the deployment identity of the decommissioned
+`www.farmcardscode.org` — Cloudflare tunnel credentials and
+`/etc/farmcardscode.env`. None of that is in the site's GitHub repo, which
+holds the application and not its identity.
+
+The `vzdump` alongside it is the VM itself. Note what it is: **the current
+stopped state, with `cloudflared` and `farmcardscode` disabled.** A `vzdump`
+does not include VM snapshots, so `pre-decommission-20260805` — the running
+site — is not in the archive. Restoring gives a working but idle VM:
+
+```bash
+qmrestore vzdump-qemu-500-*.vma.zst 500
+qm start 500
+# inside the guest:
+systemctl enable --now farmcardscode cloudflared
+```
 
 ### Known gap in captures taken before `ebc4c1a`
 
