@@ -64,6 +64,61 @@
       register: qm_status_result
       changed_when: false
 
+    # The authoritative guest-agent check lives at the end of
+    # controller-finalize-template-vm.yml, because that is the last point the
+    # guest is reachable. Promote cannot inspect a stopped guest, and must not
+    # boot one to try: finalize truncates /etc/machine-id and removes the SSH
+    # host keys as its last act, so booting here would regenerate them and bake
+    # them into every clone of this template.
+    #
+    # What promote can still catch is the path that skips finalize entirely —
+    # promoting a hand-built VM that is still running. That is how the stale
+    # template of 2026-05-07 came to exist.
+    - name: Check the guest agent when promoting a VM that is still running
+      ansible.builtin.command: "qm agent {{ template_def.vmid }} ping"
+      register: promote_agent_ping
+      changed_when: false
+      failed_when: false
+      when:
+        - template_def.agent_enabled | default(false) | bool
+        - "'status: running' in qm_status_result.stdout"
+
+    - name: Require a responding guest agent before promoting a running VM
+      ansible.builtin.assert:
+        that:
+          - promote_agent_ping.rc == 0
+        success_msg: "Guest agent responded; VM {{ template_def.vmid }} may be promoted."
+        fail_msg: >-
+          Template '{{ template_def.name }}' declares agent_enabled, but the
+          guest agent on running VM {{ template_def.vmid }} did not respond.
+          Refusing to promote: a template whose agent is absent can never pass
+          controller-validate-template-clone.yml, and the failure would not
+          surface until someone tried to use it. Run the VM through
+          controller-finalize-template-vm.yml, which installs and verifies the
+          agent, rather than promoting it directly.
+      when:
+        - template_def.agent_enabled | default(false) | bool
+        - "'status: running' in qm_status_result.stdout"
+
+    # Necessary but not sufficient — this proves only that the hypervisor will
+    # expose the agent channel, not that anything inside the guest answers on
+    # it. It catches a VM created without --agent while the catalog expects one.
+    - name: Read VM config to check the agent flag
+      ansible.builtin.command: "qm config {{ template_def.vmid }}"
+      register: promote_agent_flag_config
+      changed_when: false
+
+    - name: Require the VM agent flag to match the template definition
+      ansible.builtin.assert:
+        that:
+          - promote_agent_flag_config.stdout is search('^agent:\s*1', multiline=True)
+        fail_msg: >-
+          Template '{{ template_def.name }}' declares agent_enabled, but VM
+          {{ template_def.vmid }} has no 'agent: 1' in its config, so Proxmox
+          will not expose the guest agent channel at all. The validation clone
+          would fail regardless of what is installed inside the guest.
+      when: template_def.agent_enabled | default(false) | bool
+
     - name: Request graceful shutdown before promotion when VM is running
       ansible.builtin.command: "qm shutdown {{ template_def.vmid }} --timeout 120"
       register: qm_shutdown_result

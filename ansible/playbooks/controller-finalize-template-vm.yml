@@ -220,7 +220,13 @@
         apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 update
         apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 install -y qemu-guest-agent cloud-init sudo curl
 
-        systemctl enable qemu-guest-agent || true
+        # No "|| true" here, unlike the cloud-init units below. Those may
+        # legitimately be absent depending on the image; the guest agent is
+        # required by every template that declares agent_enabled, and a
+        # swallowed failure here is what produced a promoted template with no
+        # agent that was only caught months later at the validation gate.
+        systemctl enable qemu-guest-agent
+
         systemctl enable cloud-init || true
         systemctl enable cloud-init-local || true
         systemctl enable cloud-config || true
@@ -250,6 +256,57 @@
         executable: /bin/bash
       register: guest_finalize_result
       changed_when: guest_finalize_result.rc == 0
+
+    # Verify rather than assume the agent landed. This is the last moment it
+    # can be checked: the promote stage cannot inspect a stopped guest, and it
+    # must not boot one to try, because the cleanup above has already truncated
+    # /etc/machine-id and removed the SSH host keys — booting would regenerate
+    # exactly what was just cleaned and bake that into the template.
+    #
+    # Without this, a failed install produced a template that was promoted,
+    # tagged as a milestone, and only found to be unusable months later when
+    # the validation clone could not reach its guest agent.
+    - name: Verify the QEMU guest agent is installed and enabled in the guest
+      ansible.builtin.shell: |
+        ssh -i {{ finalize_ssh_private_key }} \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          {{ finalize_ssh_user }}@{{ template_guest_ip }} \
+          'sudo bash -s' <<'EOF'
+        set -euo pipefail
+        dpkg-query -W -f='${Status}' qemu-guest-agent 2>/dev/null \
+          | grep -q 'install ok installed' || { echo "MISSING-PACKAGE"; exit 90; }
+        systemctl is-enabled qemu-guest-agent >/dev/null 2>&1 \
+          || { echo "NOT-ENABLED"; exit 91; }
+        echo "AGENT-VERIFIED"
+        EOF
+      args:
+        executable: /bin/bash
+      register: guest_agent_verify
+      changed_when: false
+      failed_when: false
+      when: template_def.agent_enabled | default(false) | bool
+
+    - name: Require the guest agent before the template can be promoted
+      ansible.builtin.assert:
+        that:
+          - guest_agent_verify.rc == 0
+          - "'AGENT-VERIFIED' in guest_agent_verify.stdout"
+        success_msg: "qemu-guest-agent is installed and enabled in {{ template_def.name }}."
+        fail_msg: >-
+          Template '{{ template_def.name }}' declares agent_enabled, but the
+          guest agent is not usable:
+          {{ 'the qemu-guest-agent package is not installed'
+             if 'MISSING-PACKAGE' in (guest_agent_verify.stdout | default(''))
+             else ('the qemu-guest-agent service is not enabled'
+                   if 'NOT-ENABLED' in (guest_agent_verify.stdout | default(''))
+                   else 'the verification command itself failed') }}.
+          Refusing to continue, so this VM is not promoted in a state where
+          the validation clone can never pass. The usual cause is that the
+          apt install could not reach package repositories, which means egress
+          from {{ template_def.bridge }} — check that its subnet has SNAT and
+          that net.ipv4.ip_forward is 1 on the host.
+      when: template_def.agent_enabled | default(false) | bool
 
     - name: Shut down guest
       ansible.builtin.command:
