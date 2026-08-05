@@ -9,6 +9,12 @@ self-contained, classroom-deployable cyber range appliance.
 **Not on the critical path:** this supplements the Cyber.org curriculum.
 Nothing here blocks teaching this year.
 
+**Curriculum target:** Arkansas's Cybersecurity CTE pathway — a fixed
+three-course sequence. This is why `course_index`'s 3-value ceiling (see
+Identifiers) is not live pressure today, and why the template catalog and
+`data/sections.yml`'s `course_code` values should track that pathway's actual
+courses rather than a generic set.
+
 ---
 
 ## Product definition
@@ -438,9 +444,13 @@ composition, but recoverable from `data/sections.yml`: `its=1, cyb=2`,
   "next three digits: section code." `t101c011` (the VNet name) pads it back;
   `10.101.11.0/24` (the subnet, from the network formula) does not. The
   identifier is stored in a form that cannot represent its own scheme.
-- **A hard ceiling of three course types.** Course index 3 produces codes
-  `3xx`, which exceeds 255 and is not a valid IP octet. The fourth distinct
-  course a teacher runs breaks subnet generation.
+- **A ceiling of three course types.** Course index 3 produces codes `3xx`,
+  which exceeds 255 and is not a valid IP octet. Not a defect in practice:
+  this platform targets Arkansas's Cybersecurity CTE pathway, which is itself
+  a three-course sequence, so `course_index` never needs a fourth value. Worth
+  knowing before the platform generalizes past that one pathway — a district
+  running a different, larger course sequence would hit this ceiling for
+  real.
 - **The encoding is teacher-independent, but a validator demanded global
   uniqueness.** Two teachers teaching the same course in the same block —
   an ordinary timetable — produce the same `section_code` and were rejected,
@@ -456,9 +466,12 @@ composition, but recoverable from `data/sections.yml`: `its=1, cyb=2`,
 Course/day/block stay as the separate, already-readable fields they are in
 `sections.yml` (`course_code`, `day`, `block`); `section_code` becomes an
 opaque integer assigned as each section is created, from a per-teacher range.
-This removes all three defects at once — no leading zeros, no octet ceiling,
-no cross-teacher collision — without changing the VMID or network formulas
-themselves, since both already treat `section_code` as an opaque number.
+This removes the leading-zero defect and the cross-teacher collision (already
+patched as a stopgap above) without changing the VMID or network formulas
+themselves, since both already treat `section_code` as an opaque number. The
+octet ceiling is not live pressure for the three-course target pathway, but
+an opaque allocator removes it too, for free, rather than leaving a landmine
+for the day this platform generalizes past that one pathway.
 
 **Not implemented yet, and deliberately so.** `data/environments/school-lab.yml`'s
 VNet names and subnets are hand-authored to match the current encoded values;
