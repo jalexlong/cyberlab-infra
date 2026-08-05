@@ -1,0 +1,19 @@
+---
+# Galaxy dependencies for the Cyberlab control plane.
+#
+# Install from the ansible/ directory:
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# The Proxmox modules used to live in community.general. They were split into
+# their own collection; community.general 10.6.0 was the last release to carry
+# Proxmox updates, and the redirect disappears in community.general 15.0.0.
+# The playbooks already use community.proxmox.* FQCNs, so this is the only
+# external collection required.
+#
+# Factory note: a shipped appliance cannot reach Galaxy. Vendor the installed
+# collections into the controller LXC image at build time rather than resolving
+# them at deploy time, and pin exact versions here once a build is validated.
+collections:
+  - name: community.proxmox
+    version: ">=1.0.0"

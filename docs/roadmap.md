@@ -76,18 +76,26 @@ analysis:
   `NameError`), `build-imported-templates.sh`, `create-installer-template-vms.sh`.
 - **Testing and recovery docs** added.
 
-### Still open
+### The four Phase 0 defects are closed
 
-1. **`automation_token_secret` is never assigned.** `host-bootstrap.yml:263`
-   asserts on it, `:603` writes it to the controller env file, but commit
-   `4539d5d` deleted the `set_fact` that extracted it from `pveum` output.
-   Fresh installs fail. Recoverable from `45f13a9`.
-2. **Automation user gets no privileges.** No `pveum acl modify` ever runs, so
-   the token has zero permissions. `controller-validate-proxmox-api.yml` passes
-   regardless, because `/version` is readable by any authenticated user — a
-   false green.
-3. **`install-cyberlab.sh:281`** uses `#{ROTATE_API_TOKEN}` instead of `${...}`.
-4. **`generate_runtime_artifacts.py:89`** calls `raiseValueError`.
+All four defects listed in the original analysis were fixed by `c7fb52d` and
+`8f7a6af`, which landed before this document was first committed — the list was
+stale on arrival. Verified at `73bec83`:
+
+| Defect | Resolution |
+|---|---|
+| `automation_token_secret` never assigned | `set_fact` restored in `host-bootstrap.yml`, parsing the documented JSON form with a UUID-scan fallback, guarded by an assert that fails loudly when extraction yields nothing |
+| Automation user gets no privileges | `CyberlabAutomation` role created and reconciled, granted at `/` with `--propagate 1`, then read back and asserted |
+| False green in API validation | `controller-validate-proxmox-api.yml` now queries `/access/permissions` and asserts 7 required privileges at `/`, rather than inferring health from `/version` |
+| `#{ROTATE_API_TOKEN}` and `raiseValueError` | Both corrected |
+
+The role definition and the validator's required-privilege list are separate
+declarations that must agree. They currently do — all 7 asserted privileges
+(`SDN.Allocate`, `VM.Allocate`, `VM.Clone`, `VM.Config.Network`,
+`Datastore.AllocateSpace`, `Pool.Allocate`, `Sys.Modify`) exist in
+`automation_role_privs`. **Nothing enforces that agreement**, so a privilege
+added to the validator but not the role produces a bootstrap that succeeds and
+a validation that fails. Worth a CI check in Phase 1.
 
 ### Structural gaps
 
@@ -96,6 +104,8 @@ analysis:
 - **No CI.** `--syntax-check` and `bash -n` both pass on everything, so
   parse-level checks would not have caught any of the four defects above.
 - **OpenTofu files still empty** — see decision below.
+- **Phase 0 exit remains unproven.** The fixes are correct by inspection but
+  have not been run against live Proxmox hardware.
 
 ---
 
@@ -356,8 +366,14 @@ This needs a real answer from a district sysadmin before the BOM is finalized.
 
 ### Phase 0 — Stabilize (Aug 2026)
 
-Fix the four surviving defects. Add root `.gitignore` (`scripts/__pycache__/`
-is untracked), `ansible.cfg`, `requirements.yml`.
+Code work complete: the four defects are fixed (see current state above), root
+`.gitignore` covers `__pycache__/`, and `ansible/ansible.cfg` and
+`ansible/requirements.yml` now exist.
+
+**Remaining, and it needs hardware:** two consecutive clean
+`install-cyberlab.sh` runs on a wiped host, with the API token demonstrably
+performing a privileged action. Everything above is verified by inspection
+only. Until this runs on live Proxmox, Phase 0 is not closed.
 
 **Exit:** two consecutive clean `install-cyberlab.sh` runs on a wiped host;
 API token demonstrably performs a privileged action.
@@ -508,7 +524,7 @@ supplement.
 
 1. Resolve the student-network question with a district sysadmin — it gates
    the BOM
-2. Fix the four Phase 0 defects
+2. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0
 3. Stand up CI
 4. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM
