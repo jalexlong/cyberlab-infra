@@ -59,7 +59,7 @@ proprietary fork.
 |---|---|---|
 | Deployment | Classroom appliance, rolling rack | Noise, power, and thermal are product requirements |
 | Topology | 3-5 refurb mini/SFF PCs | ~32-64 GB RAM per node; density matters; no shared storage |
-| Connectivity | **Assume none** | Everything preloaded; zero downloads at deploy or run time |
+| Connectivity | **Assume none; use it if present** | Must deploy and run fully offline. Where egress exists it is used for host updates and an apt cache — see the student-network section. Templates are never built on the appliance either way |
 | Peak concurrency | 16-30 students | Drives the RAM budget and therefore the BOM |
 | VM allocation | On-demand pods | Created at lab start, destroyed at lab end |
 | Student hardware | Any browser | No client install, no VPN, no local hypervisor |
@@ -635,24 +635,156 @@ neither can ship in a prebuilt unit.
 
 ## Open design question: how do student devices reach the box?
 
-This is unresolved and it materially changes the BOM and the district
-conversation.
+Carried unresolved from the first draft (2026-08-04) through 2026-08-05.
+**Reframed 2026-08-05: this was two questions wearing one coat, and the half
+that gates the pilot is already answered.**
 
-**Model A — box joins the classroom LAN.** District assigns it an IP; students
-browse to it from school devices. Simple hardware, but requires district
-network approval and an IP allocation, and puts the appliance on their LAN.
+**Model A — box joins the LAN.** It is assigned an IP; students browse to it
+from school devices on the same subnet.
 
-**Model B — box brings its own network.** Include a switch and/or access point
-in the BOM; student devices connect directly to the lab network. Truly plug
-into power and go, and it **sidesteps district network approval almost
-entirely** — a significant product advantage.
+**Model B — box brings its own network.** A switch and/or access point in the
+BOM; student devices connect directly to the lab network, sidestepping
+district network approval.
 
 **The catch with Model B:** district-managed Chromebooks are frequently locked
 to the district network, forced through a proxy, or unable to join arbitrary
-Wi-Fi. That may make Model B unusable with exactly the student devices the
-product targets.
+Wi-Fi — possibly unusable with exactly the devices the product targets.
 
-This needs a real answer from a district sysadmin before the BOM is finalized.
+### Resolved for the pilot: Model A, already in production
+
+The current classroom runs Model A today. Servers are plugged into the
+classroom's wall ethernet ports, lab computers are on the same subnet, and
+they reach the box without any special provision. No district approval was
+sought or needed, because a teacher plugging a machine into a classroom
+ethernet port does not trigger district review.
+
+**This unblocks BOM v1.** The question was listed as gating the BOM; it gates
+the *product* BOM, not the *pilot* BOM. Nothing about the pilot cluster's
+hardware waits on a sysadmin conversation. Switch mandatory, WAP not
+purchased — buy and build against Model A.
+
+**What stays genuinely open is the district-sale case**, which is a different
+question with different unknowns (below). Do not let it hold up hardware.
+
+### Deployment location is upstream of the network question
+
+The appliance does not have to sit in the classroom. The labs are virtual —
+students reach consoles through a browser — so a district may prefer to rack
+it wherever their other network equipment lives, next to the switches it
+depends on, with easier physical and network access for whoever maintains it.
+
+That mostly dissolves Model B. **An access point in a wiring closet serves
+nobody.** Model B only makes sense for a cart that lives in the room with the
+students; the moment the box is centrally located, students reach it over the
+district's existing network by definition, which is Model A. So the real
+branch is not "how do devices reach the box" but "where does the box live,"
+and the network model falls out of it:
+
+| Deployment | Where it lives | Network model | AP in BOM? |
+|---|---|---|---|
+| **Classroom cart** | The room, on a rolling cart | A (wall port) or B | Only if B |
+| **Central rack** | District MDF/IDF with their switches | A, necessarily | No |
+| **Mobile / pop-up** | Moves between rooms or sites | B | Yes |
+
+**Model B is demoted to the mobile/pop-up case** — competition teams, summer
+camps, a cart shared between schools — where there is no permanent port to
+plug into and the AP genuinely earns its place. It is no longer a co-equal
+contender for the primary deployment, and it should not shape BOM v1. Note
+the irony that makes this easy to accept: Model B is least likely to work
+exactly where the product is most needed, since a district locked down enough
+to refuse an IP is a district whose Chromebooks cannot join a strange SSID.
+
+### Egress and the apt cache
+
+**Intent: the box gets internet egress; lab VMs still get none.** The host
+stays patched, and an apt caching proxy serves packages *into* the isolated
+section VNets so lab guests can `apt install` without SNAT and without any
+path off the box.
+
+This is the right shape, and it preserves the property that matters. Section
+VNets keep `snat: false` (`controller-bootstrap-sdn.yml`), so the Phase 5
+isolation test still asserts what it should: no route to the internet, the
+district LAN, or the management network. Students gain package installs, not
+reach. Compare the alternatives — no packages at all is pedagogically
+crippling, and giving lab VNets SNAT gives up the isolation guarantee
+entirely.
+
+**VMID `801` is already reserved for it** — "future apt-cache or package
+mirror service" in `data/bootstrap-policy.yml` and `docs/platform-pipeline.md`.
+The slot was allocated before the service was designed; this section is what
+fills it.
+
+Two things to settle when it is built:
+
+- **It is the second deliberate exception to Phase 5 isolation.** The access
+  LXC is the first, and Phase 5 already insists that exception be designed
+  rather than discovered. The apt cache needs the same network position — a
+  foot in each pod VNet, a foot with egress — and must be named in the
+  isolation test alongside Guacamole. Two carve-outs is defensible; the
+  failure mode is a fourth and a fifth arriving unexamined until isolation is
+  fiction. Colocating both on one LXC would halve the carve-outs, at the cost
+  of putting egress on the box students can already reach — a smaller attack
+  surface argues for keeping `apt-cacher-ng` separate from Tomcat. Decide in
+  Phase 5, deliberately, either way.
+- **It softens the "assume none" connectivity constraint**, which currently
+  reads "everything preloaded; zero downloads at deploy or run time."
+  Connectivity should be a *floor, not a prohibition*: the appliance must
+  work with none, and use it when present. The factory/site split is
+  unaffected — the appliance still never builds templates — but "zero
+  downloads at run time" is no longer the intent, and the Constraints table
+  should say so.
+
+### Questions for the district sysadmin — district-sale scope only
+
+Not needed for the pilot. These belong to the eventual conversation about
+dropping a prebuilt unit onto someone else's network.
+
+**Model A, the expected path:**
+
+1. What's the process and lead time for a single static IP or DHCP
+   reservation for one device — a same-day network-team ticket, or a formal
+   security review measured in weeks?
+2. **Is there 802.1X, NAC, or sticky-MAC port security on the ports this
+   would use?** This is the question that most plausibly breaks Model A, and
+   it is invisible until you try. It evidently is not in force on the current
+   classroom's ports, since servers plugged into the wall simply worked — but
+   that is a fact about one district, not a general one.
+3. Would you rather this live in a classroom or in your rack with the other
+   network equipment? (Their answer determines the chassis/mounting question
+   in Phase 3, and most sysadmins will have a strong preference.)
+4. Does your process distinguish a device requesting *internet egress* from
+   one that only needs to be *reachable on-segment*? The box wants modest
+   egress for updates (above) but its student-facing surface is inbound-only.
+5. Is there a segmented classroom/lab VLAN it could join, rather than
+   anything touching core infrastructure?
+
+**Model B, only if Model A is refused outright:**
+
+6. Are Chromebooks restricted to district Wi-Fi at the device/MDM level (a
+   Google Admin network allowlist) or the network level? Different exception
+   paths.
+7. If MDM-level: can one classroom-local SSID with no WAN uplink be added to
+   the allowlist for one set of devices, or does every SSID trigger the same
+   review regardless of what it connects to?
+8. Do the specific Chromebook models require validated internet access before
+   joining a network? Some ChromeOS configurations reject a network failing an
+   internet-reachability check on connect — which would break a no-egress AP
+   technically, even where policy permits it.
+
+### Consequences for Phase 3
+
+The central-rack possibility contradicts assumptions currently stated with
+confidence in Phase 3 and in Constraints:
+
+- **"Noise, power, and thermal are product requirements"** is a
+  classroom-cart claim. In an MDF nobody hears the box, and the noise
+  criterion is close to free.
+- **The rolling A/V cart recommendation** was argued partly from candidate
+  chassis not being rack-eared. For a district that wants this in their rack,
+  shelf trays in a 19" rack stop being a compromise and become correct.
+- These are two deployment profiles, not one. The BOM likely branches: same
+  compute, different mounting and no AP. Resolve alongside the Phase 3
+  measurements rather than guessing now.
 
 ---
 
@@ -766,7 +898,8 @@ image can no longer be produced in the first place.
 
 Acquire and validate the cluster. Measure real per-VM RAM. Verify noise under
 load in a room, power draw on a single classroom circuit, and thermals in a
-closed rack. Resolve the student-network question above. Publish BOM v1.
+closed rack. Settle the cart-versus-rack deployment profile (see Still open
+below). Publish BOM v1.
 
 **Exit:** a running 3-node cluster you have measured, not estimated.
 
@@ -810,9 +943,9 @@ M75q Gen2.
 
 #### Switch
 
-3-5 nodes plus a teacher console plus a possible WAP (if student-network
-Model B is chosen) is 5-7 ports before adding slack — **8-port unmanaged**
-over 5-port. Pod affinity keeps VM traffic node-local by design, so the
+3-5 nodes plus a teacher console plus an uplink to the wall port is 5-7 ports
+before adding slack — **8-port unmanaged** over 5-port. (The WAP that would
+have taken a port is not in BOM v1; see the student-network section.) Pod affinity keeps VM traffic node-local by design, so the
 switch only ever carries corosync heartbeat, template sync, and
 management/Guacamole traffic: gigabit unmanaged is plenty. Keep it dumb on
 purpose — zero config is consistent with "reproducible from the public
@@ -837,9 +970,16 @@ nowhere near stressing a standard classroom 15A circuit.
 
 #### Still open
 
-None of the above resolves the student-network question (Model A vs B)
-above, and that materially changes port count and whether a WAP belongs on
-the same cart/circuit. Pin it down before locking BOM v1.
+**Resolved 2026-08-05 for BOM v1 purposes: Model A, no WAP.** The pilot
+classroom already runs Model A off wall ethernet ports, and the central-rack
+deployment option demotes Model B to the mobile/pop-up case. The switch was
+always mandatory; the WAP is not purchased. See the student-network section.
+
+What that section leaves open for Phase 3 to settle: whether the product ships
+a **classroom-cart** or **central-rack** profile, which changes mounting (A/V
+cart versus rack shelf trays) and softens the noise criterion, since a box in
+an MDF has no one to disturb. Same compute either way, so this does not block
+node selection or the measurement work.
 
 ### Phase 4 — Pod provisioning engine (Nov-Dec 2026)
 
@@ -879,6 +1019,33 @@ Reproducible image build. Offline update bundle, signed, applied from USB.
 First-boot configuration for a district sysadmin. Recovery procedure. The
 documentation a stranger needs to run this without you.
 
+#### Pre-deployment site survey
+
+Ship a short checklist answered **before** a unit is boxed, because each item
+below fails at the customer's site rather than on the bench, and two of them
+fail silently.
+
+- **Port security on the target ethernet ports — 802.1X, NAC, or sticky-MAC.**
+  The single most likely cause of a unit that arrives, plugs in, and does not
+  work. A port doing 802.1X supplicant authentication drops an unregistered
+  device with no error the device can report; from the classroom it presents
+  as "the box is broken." The pilot classroom has none of this — servers
+  plugged into wall ports simply worked — which is exactly why it is invisible
+  from here and has to be asked rather than assumed. If present, the fixes are
+  a MAC exemption on the port, a dedicated non-authenticating port, or MAB,
+  all of which need lead time from their network team.
+- **Where the unit lives** — classroom or central rack. Determines mounting
+  hardware, whether noise matters, and which cable run it needs. See the
+  student-network section.
+- **IP assignment** — static or DHCP reservation, on which VLAN, and whether
+  students' devices can route to it. A correct IP on a segment students cannot
+  reach is the second silent failure.
+- **Whether egress is permitted** for host updates and the apt cache. The unit
+  functions without it; it just stops self-updating. Ask so the answer is
+  recorded, not discovered.
+- **Switch port count available**, if the unit uplinks to district
+  infrastructure rather than carrying its own switch.
+
 ### Phase 8 — Pilot (Mar-Apr 2027)
 
 Your own classroom, one section, one scenario. Then a friendly district.
@@ -889,8 +1056,13 @@ supplement.
 
 ## Immediate next actions
 
-1. Resolve the student-network question with a district sysadmin — it gates
-   the BOM
-2. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0
-4. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
-   enough to publish as a BOM
+1. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0
+2. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
+   enough to publish as a BOM — **no longer blocked** on the student-network
+   question, which resolved to Model A for the pilot
+3. Design the apt-cache service into VMID `801` as a Phase 5 isolation
+   carve-out, alongside the access LXC rather than after it
+
+The district-sysadmin conversation is no longer an immediate action. It
+belongs to the prebuilt SKU (Phase 7) and its question list is parked in the
+student-network section until there is a district to ask.
