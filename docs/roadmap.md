@@ -531,13 +531,37 @@ Code work complete: the four defects are fixed (see current state above), root
 `.gitignore` covers `__pycache__/`, and `ansible/ansible.cfg` and
 `ansible/requirements.yml` now exist.
 
-**Remaining, and it needs hardware:** two consecutive clean
-`install-cyberlab.sh` runs on a wiped host, with the API token demonstrably
-performing a privileged action. Everything above is verified by inspection
-only. Until this runs on live Proxmox, Phase 0 is not closed.
-
 **Exit:** two consecutive clean `install-cyberlab.sh` runs on a wiped host;
 API token demonstrably performs a privileged action.
+
+**Status 2026-08-05 — met in substance, gate still open.** Six runs against
+`pve1`, ending in two consecutive runs that are identical, converged and
+exit zero, with the API token validating its 7 required privileges from
+inside CT `800` each time. What the runs did *not* cover is the wiped host:
+CT `800`, the automation user, the pools and the legacy template VMs were all
+still present, so controller creation and template-volume discovery were
+skipped as already-satisfied rather than exercised. The gate stays open until
+a run on a genuinely fresh host. See `docs/testing.md` for the run log.
+
+The runs earned their keep — nothing here was visible from a laptop:
+
+- **`CyberlabAutomation` did not exist on the host.** The role and its ACL
+  were created by the first run, and the token then validated. Phase 0 defect
+  2 is now proven against live Proxmox rather than by inspection.
+- **The installer bounced the controller on every run.** `pct set` writes
+  rather than compares, so the network reconcile fired unconditionally,
+  stopping and starting CT `800` each time and dropping its DHCP lease — its
+  address moved mid-session. Fixed in `9e463b0`.
+- **`bootstrap-controller.sh` re-ran every time**, doing `apt-get install` and
+  a `git pull` inside the controller on each pass, which made a re-run depend
+  on network reachability it did not need. Fixed in `ab9762c`.
+- **The completion summary reported skipped phases as completed.** A run with
+  `--skip-sdn-bootstrap` printed that it was skipping SDN and then listed
+  "SDN zone and VNET bootstrap" under completed phases.
+
+`changed` on a converged second run fell from 12 to 2 across those fixes. The
+two that remain are the `pveum` role and ACL reconciles, left deliberately as
+a reconcile pattern.
 
 ### Phase 1 — CI (Sep 2026) — done
 

@@ -171,6 +171,48 @@ turned to teardown before they were run.
 later the same day, so `prov0` and the section VNets no longer exist. The
 checkpoint above still describes what the code proved when it ran.
 
+### Phase 0 installer runs: 2026-08-05, `pve1`
+
+Six `install-cyberlab.sh` runs, all with `--skip-sdn-bootstrap` so the
+installer would not rebuild the SDN that had just been deleted. Before the
+first run, stale SDN residue was cleared from the host: the
+`interfaces.d/sdn` stub, `pve-ipam-state.json` (which still held five ghost
+zones — `ITSec`, `CSec`, `virtnet`, `testnet`, `test` — long after their
+configs were gone), `mac-cache.json`, and five orphaned `dnsmasq.*.leases`
+files. `vmbr0` and the physical NICs were not touched.
+
+| Run | Change | `host-bootstrap` | CT `800` |
+|---|---|---|---|
+| 1 | baseline | `changed=13` | bounced |
+| 2 | baseline | `changed=12` | bounced |
+| 3 | after `9e463b0` | `changed=8` | stayed up |
+| 4 | after `9e463b0` | `changed=8` | stayed up |
+| 5 | after `ab9762c` | `changed=2` | stayed up |
+| 6 | after `ab9762c` | `changed=2` | stayed up |
+
+Every run exited zero and reported `failed=0`; API validation was
+`changed=0` throughout, ending `Automation token holds all 7 required
+privileges at '/'`.
+
+**Exit zero twice would have hidden all three defects.** The signal was
+`changed` on a second run against an unchanged host, which is the useful
+reading of "clean" in the exit criterion — not the exit status. Runs 1 and 2
+exited zero while stopping and restarting the controller, moving its address
+from `10.64.62.127` to `10.64.62.74`, and re-running `apt-get install` inside
+it. A criterion phrased only as "runs succeed" would have been satisfied by
+that.
+
+The remaining `changed=2` is `Reconcile the Cyberlab automation role
+privileges` and `Grant the automation user its role at the root path`. Both
+are `pveum` calls that write rather than compare, kept deliberately as a
+reconcile pattern.
+
+**Not proven: the wiped-host condition.** These ran against a host that kept
+CT `800`, the automation user, the pools and the legacy template VMs
+(`9001`–`9004`). Controller creation and the Debian 13 template-volume
+discovery were therefore skipped as already-satisfied rather than exercised.
+Phase 0 is met in substance and its gate stays open.
+
 ---
 
 ## Current syntax-checked but not live-tested work
