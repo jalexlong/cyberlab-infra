@@ -703,12 +703,53 @@
               Controller diagnostics:
               {{ controller_network_diagnostics.stdout }}
 
+    # bootstrap-controller.sh installs packages and clones or pulls the repo.
+    # Running it on every pass re-ran apt-get update, apt-get install and a git
+    # fetch each time — real work, not a mislabelled no-op, and it made the
+    # installer depend on package repositories being reachable even when the
+    # controller was already fully bootstrapped. Detect that state and skip.
+    #
+    # Pass -e controller_force_bootstrap=true to run it regardless, which is
+    # what you want after changing the script itself.
+    - name: Check whether the controller is already bootstrapped
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ bootstrap_policy.bootstrap.controller_lxc.ctid | string }}"
+          - --
+          - sh
+          - -c
+          - "test -d /root/cyberlab-infra/.git && command -v ansible >/dev/null"
+      register: controller_bootstrap_check
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: Decide whether to run the controller bootstrap script
+      ansible.builtin.set_fact:
+        controller_needs_bootstrap: >-
+          {{
+            (controller_force_bootstrap | default(false) | bool)
+            or controller_bootstrap_check.rc != 0
+          }}
+
+    - name: Report controller bootstrap decision
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Controller is not bootstrapped (or a run was forced); bootstrap-controller.sh will run.'
+            if controller_needs_bootstrap
+            else 'Controller already has its repo and ansible; skipping bootstrap-controller.sh.'
+          }}
+
     - name: Copy bootstrap-controller.sh to Proxmox host temp path
       copy:
         src: "{{ repo_root }}/scripts/bootstrap-controller.sh"
         dest: /tmp/bootstrap-controller.sh
         mode: "0755"
       become: true
+      when: controller_needs_bootstrap | bool
 
     - name: Push bootstrap-controller.sh into controller
       command: >
@@ -716,19 +757,28 @@
         {{ bootstrap_policy.bootstrap.controller_lxc.ctid }}
         /tmp/bootstrap-controller.sh
         /tmp/bootstrap-controller.sh
+      register: controller_bootstrap_push
+      changed_when: controller_bootstrap_push.rc == 0
       become: true
+      when: controller_needs_bootstrap | bool
 
     - name: Check bootstrap script inside controller
       command: >
         pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
         ls -l /tmp/bootstrap-controller.sh
+      register: controller_bootstrap_script_check
+      changed_when: false
       become: true
+      when: controller_needs_bootstrap | bool
 
     - name: Make bootstrap-controller.sh executable inside controller
       command: >
         pct exec {{ bootstrap_policy.bootstrap.controller_lxc.ctid }} --
         chmod 0755 /tmp/bootstrap-controller.sh
+      register: controller_bootstrap_chmod
+      changed_when: controller_bootstrap_chmod.rc == 0
       become: true
+      when: controller_needs_bootstrap | bool
 
     - name: Run bootstrap-controller.sh inside controller
       command: >
@@ -737,6 +787,27 @@
         REPO_URL={{ cyberlab_repo_url }}
         REPO_BRANCH={{ cyberlab_repo_branch }}
         bash /tmp/bootstrap-controller.sh
+      register: controller_bootstrap_run
+      changed_when: controller_bootstrap_run.rc == 0
+      become: true
+      when: controller_needs_bootstrap | bool
+
+    # install -d is idempotent but always exits 0, so reporting its result as
+    # changed made every run look like it had created the directory. Test, then
+    # create only when absent.
+    - name: Check whether controller SSH directory exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -d
+          - /root/.ssh
+      register: controller_ssh_dir_check
+      changed_when: false
+      failed_when: false
       become: true
 
     - name: Ensure controller SSH directory exists
@@ -752,6 +823,7 @@
           - "0700"
           - /root/.ssh
       become: true
+      when: controller_ssh_dir_check.rc != 0
 
     - name: Check whether controller SSH key exists
       ansible.builtin.command:
@@ -818,6 +890,21 @@
         state: present
       become: true
 
+    - name: Check whether controller secrets directory exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid | string }}"
+          - --
+          - test
+          - -d
+          - "{{ controller_secrets_dir }}"
+      register: controller_secrets_dir_check
+      changed_when: false
+      failed_when: false
+      become: true
+
     - name: Ensure controller secrets directory exists
       ansible.builtin.command:
         argv:
@@ -831,6 +918,7 @@
           - "0700"
           - "{{ controller_secrets_dir }}"
       become: true
+      when: controller_secrets_dir_check.rc != 0
 
     - name: Write Proxmox API env file on Proxmox host temp path when token was created or rotated
       ansible.builtin.copy:
