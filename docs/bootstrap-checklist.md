@@ -52,6 +52,58 @@ Before beginning, have these ready:
 
 ---
 
+# Phase 0-minus: Capture before a deliberate teardown
+
+Skip this section on a genuinely fresh host. It applies when wiping a host
+that has been used before — including the exploratory build that preceded the
+current architecture.
+
+The point is not to preserve data. It is to preserve the **facts** a rebuild
+needs and nobody remembers: which bridge carries management traffic, what the
+storage is actually called, which VMIDs were in use, what the SDN zone was
+named. Those are exactly the Required Inputs above, and rediscovering them
+costs more than capturing them.
+
+```bash
+# On the Proxmox host, with the USB stick mounted.
+mkdir -p /mnt/usb
+./scripts/capture-host-state.sh --dest /mnt/usb/pve1-$(date +%Y%m%d)
+```
+
+The script is read-only — it creates and modifies nothing on the host.
+
+Options:
+
+| Flag | Effect | When |
+|---|---|---|
+| *(none)* | Config and facts only. Small and fast. | The normal case for a disposable host |
+| `--with-guests` | Also `vzdump` every VM and container | Only if a specific guest is worth keeping |
+| `--with-secrets` | Also copy `/etc/pve/priv/` | Rarely. See below |
+
+`/etc/pve/priv/` is **excluded by default**. It holds API token secrets and
+cluster keys, the rebuild regenerates all of it, and the usual destination for
+this capture is a USB stick that then lives in a drawer. Per the secrets
+hygiene section of the README, any previously exposed token should be treated
+as compromised and rotated rather than restored.
+
+## Verify the capture before wiping anything
+
+An unverified capture is not a capture. Confirm it landed and is readable
+**from a second machine**, not just from the host you are about to erase:
+
+```bash
+cat /mnt/usb/pve1-*/MANIFEST.txt
+cat /mnt/usb/pve1-*/facts/pvesm-status.txt     # storage names
+cat /mnt/usb/pve1-*/facts/ip-addr.txt          # bridge and address layout
+ls /mnt/usb/pve1-*/config/pve/qemu-server/     # VM configs
+umount /mnt/usb
+```
+
+Then fill in the Required Inputs above **from the capture**, not from memory,
+and proceed to Phase 0A.
+
+---
+
 # Phase 0A: Proxmox Host Bootstrap
 
 ## 1. Fresh host validation

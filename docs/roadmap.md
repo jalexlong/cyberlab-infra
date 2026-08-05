@@ -134,8 +134,36 @@ Everything below is deliberately deferred because it cannot be verified from a
 laptop. Collected here so a lab session has one list to work from rather than
 five phases to re-read.
 
+**The existing school host is disposable.** It carries an exploratory build
+that predates this architecture — a proto-prototype used to work out how the
+pieces wire together — and nothing on it is load-bearing. The intended path is
+to capture it (`scripts/capture-host-state.sh`, see
+`docs/bootstrap-checklist.md` Phase 0-minus), wipe it, and rebuild on the
+current design.
+
+That changes the calculus for everything in this table. The deferrals below
+were originally written as *risk* — "don't touch the only tested path to a
+working host." With a disposable host the risk is mostly gone and what remains
+is *iteration cost*: a bad run costs a rebuild, not data. So these items are
+better batched into one lab session than spread across several cautious ones,
+and a failed run is an acceptable outcome rather than something to avoid.
+
+Two cautions survive the pivot:
+
+- **Capture before wiping, and verify the capture from a second machine.** The
+  facts are cheap to save and expensive to rediscover.
+- **Rotate rather than restore any credential.** Nothing in `/etc/pve/priv/`
+  should come back; the rebuild regenerates it.
+
+Suggested order for the first session after the wipe: capture and verify, then
+wipe, then the Phase 0 run twice — because a clean install on a genuinely
+fresh host is the thing every other item depends on. The lint retirements are
+good work to do *between* the two install runs, since re-running the installer
+is the verification they need anyway.
+
 | Item | Why it needs hardware | Where |
 |---|---|---|
+| Capture the existing host, verify the capture elsewhere, then wipe | The facts are cheap to save and expensive to rediscover | Phase 0-minus |
 | Two consecutive clean `install-cyberlab.sh` runs on a wiped host; token performs a privileged action | The Phase 0 exit criterion. The defect fixes are correct by inspection only, and `set_fact` parsing of `pveum` output is exactly the kind of thing that reviews clean and surprises live | Phase 0 |
 | Retire `fqcn` from `.ansible-lint` `skip_list` | Mechanical, but touches nearly every playbook at once | Phase 1 |
 | Retire `no-changed-when` | Several hits are genuine idempotency bugs, several are correct as written (reconcile tasks that really do change state each run). Needs per-task judgement plus a run to confirm | Phase 1 |
