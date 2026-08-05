@@ -112,6 +112,12 @@ The current known-good runtime checkpoint is:
 milestone/debian13-template-promoted
 ```
 
+**Caveat on the artifact, not the checkpoint.** The template VM that milestone
+produced was found on 2026-08-05 to have no `qemu-guest-agent` installed, and
+was rebuilt. The checkpoint still describes what the code proved when it ran;
+it does not mean the VM sitting on the host was ever fully valid. See the
+template pipeline run below.
+
 That checkpoint proves:
 
 - host bootstrap works
@@ -249,19 +255,81 @@ touched the host, confirming `all_vnets` resolves to `[prov0]` with sections
 off and to all five with them on, while `declared_vnets` stays at five either
 way so the name assertions keep covering section VNets.
 
+### Template pipeline first live run: 2026-08-05, `pve1`
+
+The validation clone and the staged pipeline had never executed against live
+Proxmox. Both ran at `031629f`, once `prov0` was back.
+
+**Run 1 — validation clone alone, against the existing template 900: FAILED,
+and correctly.** `ok=20 changed=4 failed=1`, stopping at:
+
+```text
+Template 'tpl-debian13-base' expects the QEMU guest agent, but validation
+clone 950 did not respond to guest-agent ping.
+```
+
+Everything around the agent worked. The clone took a DHCP lease from `prov0`
+(`10.30.0.100`), answered a ping from the host with 0% loss, accepted SSH, and
+reached the internet through `prov0`'s SNAT — `curl http://deb.debian.org/`
+returned 200 and `apt-get update` succeeded. The failure was the agent alone:
+`dpkg-query` found no `qemu-guest-agent` package in the guest, though the
+hypervisor side was correct (`agent: 1`, and
+`/dev/virtio-ports/org.qemu.guest_agent.0` present).
+
+**The template was stale, not the playbook.** Template 900's disk was created
+2026-05-07. The commit that made `prov0` egress work, `5dd0092`, landed
+2026-05-10 — three days later. `controller-finalize-template-vm.yml` does
+install `qemu-guest-agent`, but when that template was built the VM could not
+reach the package repositories. It was promoted anyway, tagged
+`milestone/debian13-template-promoted`, and carried `agent: 1` while being
+incapable of ever passing validation.
+
+**This is the validation gate doing exactly what it exists for**, on its first
+live execution: refusing a template that cannot meet its own declared
+contract. It had simply never been run against the artifact it was meant to
+judge.
+
+**Run 2 — full pipeline rebuild: PASSED.** Template 900 was backed up
+(`vzdump`, 346 MB, to USB) and destroyed, since
+`controller-prepare-template-vm.yml` deliberately refuses to prepare over a
+promoted template and offers no override. Then
+`controller-build-template-pipeline.yml -e template_name=debian13` ran
+`prepare → finalize → promote → validate` end to end:
+
+```text
+pve1 : ok=100  changed=21  unreachable=0  failed=0  skipped=9
+validation_passed=true
+validation_clone_ipv4=10.30.0.100
+```
+
+The rebuilt template has a working guest agent — the clone answered
+`qm agent ping` and `systemctl is-active qemu-guest-agent` reported `active` —
+and is NIC-less as convention requires, with the NIC stripped at promotion.
+
+**Phase 2's remaining exit criterion is the negative test:** a deliberately
+broken image must fail validation. Run 1 is suggestive but not that test — it
+was an accidental failure, not a planted one.
+
+### Known gap: nothing verifies the agent before promotion
+
+`controller-finalize-template-vm.yml` runs `systemctl enable qemu-guest-agent
+|| true`, and `controller-promote-template.yml` checks nothing about the guest.
+A template whose package install silently failed can still be promoted, and the
+first sign of trouble arrives later at the validation gate — which is what
+happened here across a three-month gap. A check at the end of finalize, before
+promotion, would catch it at the point of failure instead.
+
 ---
 
 ## Current syntax-checked but not live-tested work
 
 The following work has passed static and Ansible syntax checks but still requires live Proxmox validation:
 
-- validation clone automation
-- `controller-validate-template-clone.yml`
-- updated `controller-build-template-pipeline.yml` stage:
-  - prepare
-  - finalize
-  - promote
-  - validate clone
+- the deliberately-broken-image negative test (Phase 2 exit)
+- `controller-build-template-pipeline.yml` for templates other than
+  `debian13` — `ubuntu2604`, `parrot`, `win7`, `metasploitable2`. The Windows
+  and Metasploitable entries set `agent_enabled: false`, so they exercise a
+  different validation path than the one now proven.
 
 This means the playbooks parse correctly, but live behavior is not yet proven.
 
