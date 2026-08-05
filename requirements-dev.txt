@@ -6,9 +6,10 @@
 #
 # Then run the same checks CI runs:
 #
-#   .venv/bin/yamllint ansible/ data/
+#   .venv/bin/yamllint ansible/ data/ .github/
 #   .venv/bin/ansible-lint --offline ansible/
-#   .venv/bin/ruff check scripts/
+#   .venv/bin/ruff check scripts/ tests/
+#   .venv/bin/shellcheck --severity=warning scripts/*.sh
 #   .venv/bin/python -m pytest tests/
 #
 # Versions are floors, not pins. CI installs fresh, so a tool release that
@@ -17,4 +18,7 @@ ansible-lint>=25.0.0
 pytest>=8.0.0
 PyYAML>=6.0
 ruff>=0.6.0
+# CI installs shellcheck from apt; this wheel vendors the same binary so the
+# commands above are runnable from a fresh clone without a system package.
+shellcheck-py>=0.10.0
 yamllint>=1.35.0

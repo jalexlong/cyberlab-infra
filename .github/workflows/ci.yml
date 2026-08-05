@@ -42,11 +42,11 @@ jobs:
       - name: ruff
         run: ruff check scripts/ tests/
 
+      # shellcheck comes from the shellcheck-py wheel in requirements-dev.txt,
+      # installed above. Pulling it from apt as well would leave the enforced
+      # version depending on PATH order rather than on the declared floor.
       - name: shellcheck
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          shellcheck --severity=warning scripts/*.sh
+        run: shellcheck --severity=warning scripts/*.sh
 
   test:
     name: Repository invariants
