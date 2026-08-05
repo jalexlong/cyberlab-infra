@@ -645,6 +645,28 @@ task that requires internet and move it behind a factory-only flag.
 **Exit:** a deliberately broken image fails validation; a documented image set
 is producible offline from a bench build.
 
+**Status 2026-08-05 — first half met.** Debian 13 is green through the full
+pipeline, and the broken-image half of the exit is done: the real stale
+template of 2026-05-07 was kept as a `vzdump` and restored deliberately, and
+validation refused it (`failed=1`) while the good image passed the same test
+(`validation_passed=true`). Details and how to reproduce are in
+`docs/testing.md`.
+
+Promotion is now gated on a working guest agent (`a835073`), so that particular
+image can no longer be produced in the first place.
+
+**Still open for Phase 2:**
+
+- **Offline producibility from a bench build** — the second half of the exit,
+  and entirely untested. Every build so far has pulled a cloud image and run
+  `apt-get` over `prov0`'s SNAT, which is exactly what a shipped appliance
+  cannot do. This is the factory/site split, and it is the larger piece.
+- **The other four templates.** Only `debian13` has been built live.
+  `win7` and `metasploitable2` set `agent_enabled: false`, so they take a
+  different validation path than the one now proven, and neither is a
+  `cloud_image` build.
+- **Juice Shop and Metasploitable3** are not in the catalog yet.
+
 ### Phase 3 — Hardware and BOM (Oct-Nov 2026)
 
 Acquire and validate the cluster. Measure real per-VM RAM. Verify noise under

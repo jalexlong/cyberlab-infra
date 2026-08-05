@@ -306,9 +306,55 @@ The rebuilt template has a working guest agent — the clone answered
 `qm agent ping` and `systemctl is-active qemu-guest-agent` reported `active` —
 and is NIC-less as convention requires, with the NIC stripped at promotion.
 
-**Phase 2's remaining exit criterion is the negative test:** a deliberately
-broken image must fail validation. Run 1 is suggestive but not that test — it
-was an accidental failure, not a planted one.
+**Phase 2's negative test was then run deliberately — see below.** Run 1 above
+is suggestive but is not that test: it was an accidental failure, not a planted
+one.
+
+### Phase 2 negative test: a broken image must fail validation
+
+Run 2026-08-05 on `pve1`. The fixture is not synthetic. The stale template of
+2026-05-07 — the real one, with no `qemu-guest-agent` — was kept as a `vzdump`
+and restored as VMID `900` on purpose.
+
+That makes it a better test than damaging a good image would be, because it is
+the exact shape a bad build actually takes: `qmrestore` preserves the template
+flag, so the fixture comes back with `template: 1`, `agent: 1`, and no NIC. It
+is correct in every way a configuration check can see, and wrong only inside
+the guest.
+
+| | Result |
+|---|---|
+| Broken image | `ok=20 changed=4 failed=1`, exit 2 |
+| Good image (control) | `ok=26 changed=4 failed=0`, exit 0, `validation_passed=true` |
+
+Same playbook, same host, same `prov0` — only the image differed. **The control
+is the half that makes this meaningful**: a gate that fails everything would
+have produced the first line and taught nothing.
+
+Failure was at the guest agent:
+
+```text
+Template 'tpl-debian13-base' expects the QEMU guest agent, but validation
+clone 950 did not respond to guest-agent ping.
+```
+
+**Reproducing it.** Both `vzdump` archives live on the `pve1` USB stick and are
+distinguished only by timestamp, so its `README.txt` labels which is which:
+
+```text
+vzdump-qemu-900-2026_08_05-11_25_42.vma.zst   BROKEN — the negative-test fixture
+vzdump-qemu-900-2026_08_05-12_28_35.vma.zst   GOOD   — restore this one
+```
+
+Restore the broken one as `900`, run
+`controller-validate-template-clone.yml -e template_name=debian13`, confirm it
+fails, then restore the good one and confirm it passes. Running only the first
+half proves less than it appears to.
+
+**What this does not cover.** Only the guest-agent assertion has been driven to
+failure. The non-loopback IPv4 requirement and the host-to-clone ping have only
+ever been observed passing. An image that boots with a working agent but no
+usable address would exercise those, and has not been tried.
 
 ### Closed: promotion is now gated on a working guest agent (`a835073`)
 
