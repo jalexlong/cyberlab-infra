@@ -1001,6 +1001,116 @@ carved out in the isolation test. Settle this in Phase 5 rather than
 discovering it in Phase 6, or the test gets written and then quietly weakened
 to make consoles work.
 
+#### `snat: false` is not isolation — suspected, and the first thing to test
+
+The roadmap has been reading `snat: false` on section VNets as "no egress at
+all" (`controller-bootstrap-sdn.yml:61` says so in a comment). **That is
+probably wrong, and the error is in the direction that matters.** SNAT
+controls address translation, not reachability. What the current build
+produces is:
+
+- a `simple` zone, which puts a **gateway address for every VNet subnet on the
+  host itself**;
+- `net.ipv4.ip_forward=1`, set persistently in
+  `/etc/sysctl.d/99-cyberlab-forwarding.conf` and *asserted* by the SDN
+  bootstrap — enabled for `prov0`'s SNAT, but forwarding is global, not
+  per-interface;
+- **no firewall rules anywhere in the repository.** No datacenter firewall
+  config, no VNet rules, nothing.
+
+A host that routes, with an address on every lab subnet and no filter, is a
+router between all of them. So a lab guest can likely reach other sections'
+subnets, `prov0`'s `10.30.0.0/24`, and — most seriously — **the Proxmox
+management address on `vmbr0`**, which the host answers directly and has a
+return route for. Phase 5's stated requirement is no path to "the internet,
+the district LAN, or the Proxmox management network." The third is the one
+that plausibly already fails.
+
+Actual internet access is still unlikely, since a lab-sourced packet matches
+no SNAT rule and gets no return path — so "no egress" is accidentally true for
+the internet and accidentally false for everything local.
+
+**Epistemic status: reasoned from the configuration, not observed.** Section
+VNets exist on no host right now, so this could not be tested from this
+session. Confirm before designing around it — build one section VNet, attach a
+guest, and from it try (a) `ping` the management IP, (b) reach a guest in
+another section, (c) reach `10.30.0.1`. If those succeed, isolation is a
+firewall project, not an SDN-flag project, and every design below depends on
+it.
+
+#### Package cache — the second deliberate carve-out
+
+Fills the VMID reservation for a "future apt-cache or package mirror service"
+and delivers `apt install` inside lab networks without giving them reach. See
+the student-network section for the intent.
+
+**Placement: one LXC per node, on a per-node service VNet.** Not one shared
+service for the cluster. Pod affinity puts pod networks in node-local `simple`
+zones — the existing hosts already prove this, each having carried its own
+independent `virtnet` — so a cache container on node 1 has no path to a pod
+VNet on node 2. A cache per node keeps every packet node-local, costs only
+disk, and matches the decision already accepted for templates ("replicated to
+every node's local storage").
+
+Three alternatives, and why not:
+
+- **One interface per pod VNet on a single container.** Strongest isolation
+  story — link-local, no routing permitted at all — but Proxmox caps an LXC at
+  ten NICs and Phase 5 wants a VNet *per pod*. Dead at roughly nine students.
+- **Put the cache on `prov0`.** Tempting, since `prov0` is the one subnet with
+  `snat: true` and already has egress. Rejected on architecture: `prov0` is
+  factory-time infrastructure, stripped from every shipped unit, and the
+  factory/site split is the defining split of this design. A site-time service
+  must not live on a factory-time network.
+- **Run `apt-cacher-ng` on the Proxmox host directly.** No container, no VMID,
+  no cross-node problem, bound to each VNet gateway. Rejected on blast radius:
+  this is a lab where students practice exploitation by design, and a service
+  reachable from lab networks must not run on the hypervisor.
+
+**Use an explicit proxy, not a transparent one.** Bake
+`Acquire::http::Proxy "http://<node-cache>:3142";` into template images rather
+than intercepting port 80 with DNAT. It is declarative, it is visible in the
+image, and it **fails closed** — if the cache is unreachable, `apt` errors
+instead of quietly attempting to reach the internet. It also removes the DNS
+dependency from lab guests entirely for package installs, since the proxy
+resolves upstream names on their behalf.
+
+**The cold-cache problem is the one that bites the shipped SKU.**
+`apt-cacher-ng` caches on demand, so an appliance that ships with an empty
+cache and no egress serves nothing, and the feature is decorative exactly
+where it was supposed to matter most. **The factory must seed the cache**, and
+seeding is a factory step in the same sense as template building. Two
+consequences: budget the disk (a seeded Debian set for lab tooling is
+plausibly 10-20 GB per node, times node count), and pin the retention config —
+`apt-cacher-ng` expires unreferenced files by default, which on an offline
+appliance would slowly empty the cache with nothing able to refill it.
+
+**The two carve-outs point in opposite directions, and that is what makes them
+testable.** Guacamole *initiates into* pod VNets and pods must never initiate
+to it; the cache is *initiated to* by pods and must never initiate to them.
+Both are unidirectional. State both as stateful rules in that form and the
+isolation test writes itself.
+
+**What the isolation test must assert**, from inside a pod VNet:
+
+1. No route to the internet, tested **by IP**, not by name — a DNS failure
+   passes a naive test for the wrong reason.
+2. No reach to the district LAN, and specifically **not the Proxmox management
+   address**. This is the assertion the finding above says may fail today.
+3. No reach to another pod's or section's subnet.
+4. Reaches the cache on `3142` and **nothing else on that host** — the
+   carve-out is a host *and port*, not a host. Testing only that the cache
+   works would pass a container with SSH exposed to every student in the
+   building.
+5. Guacamole reaches pod guests; pod guests do not reach Guacamole.
+6. `apt-get update` and an install succeed through the proxy — the carve-out
+   is verified working, not merely permitted.
+
+**VMID consequence: the single `801` reservation is wrong.** VMIDs are
+cluster-unique, so a per-node service cannot be one ID. `data/bootstrap-policy.yml`
+and `docs/platform-pipeline.md` now reserve `801-805`, one per node, matching
+the 3-5 node topology.
+
 ### Phase 6 — Access layer (Jan 2027)
 
 **A single LXC** holding `guacd`, the Tomcat web app, and PostgreSQL together —

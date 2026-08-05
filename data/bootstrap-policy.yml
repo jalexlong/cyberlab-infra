@@ -37,10 +37,20 @@ vmid_policy:
       purpose: "Cyberlab infrastructure, control-plane services, and shared support services."
       assignments:
         800: "Cyberlab automation controller LXC"
-        801: "Reserved for future apt-cache or package mirror service"
+        801: "Reserved: package cache, cluster node 1"
+        802: "Reserved: package cache, cluster node 2"
+        803: "Reserved: package cache, cluster node 3"
+        804: "Reserved: package cache, cluster node 4"
+        805: "Reserved: package cache, cluster node 5"
       notes:
         - "Infrastructure VMIDs are manually assigned and should remain stable across rebuilds."
         - "These systems manage or support the platform and are not classroom workloads."
+        - >-
+          The package cache takes one ID per node rather than a single shared ID
+          because VMIDs are cluster-unique and the service must be node-local:
+          pod networks are node-local SDN zones, so a cache on one node cannot
+          serve pods on another. Five are reserved to match the 3-5 node
+          topology. See the Phase 5 package-cache section in docs/roadmap.md.
 
     golden_templates:
       start: 900

@@ -139,7 +139,12 @@ Infrastructure and service systems live in:
 Current assignments:
 
 - `800`: Cyberlab automation controller LXC
-- `801`: reserved for future apt-cache or package mirror service
+- `801-805`: reserved for the package cache, one container per cluster node.
+  It takes an ID per node rather than one shared ID because VMIDs are
+  cluster-unique and the service has to be node-local — pod networks are
+  node-local SDN zones, so a cache on one node cannot serve pods on another.
+  Five reserved to match the 3-5 node topology. See the Phase 5 package-cache
+  section in `docs/roadmap.md`.
 
 These systems manage or support the platform and are not classroom workloads.
 
