@@ -99,10 +99,13 @@ a validation that fails. Worth a CI check in Phase 1.
 
 ### Structural gaps
 
-- **Per-section VNets are never created.** Only `prov0` exists.
-- **No egress control** on classroom networks.
-- **Phase 0 exit remains unproven.** The fixes are correct by inspection but
-  have not been run against live Proxmox hardware.
+- **There is no SDN on either host.** All of it was deliberately removed on
+  2026-08-05 — see the note below. Per-section VNets and egress control are now
+  Phase 5 work to build from zero rather than existing behaviour to tighten.
+- **Phase 0 exit remains unproven.** The fixes are correct by inspection and
+  parts of the bootstrap path have now been exercised live (see
+  `docs/testing.md`), but the exit criterion itself — two consecutive clean
+  `install-cyberlab.sh` runs on a wiped host — has not been run.
 - **ansible-lint runs at `basic` with four rules deferred** (`fqcn`,
   `no-changed-when`, `risky-shell-pipe`, `name` — 68 findings). Each is a real
   improvement, but fixing them edits the only currently-tested path to a
@@ -126,6 +129,40 @@ of the file caught it. Two lessons: a playbook that "passes" by matching no
 hosts is not passing, and mechanically satisfying a linter can raise real risk
 while lowering apparent risk.
 
+### Removed: all SDN, both hosts (2026-08-05)
+
+Zones, VNets and subnets were deleted from `pve1` and `pve2`. Nothing remains:
+no VNet interfaces, no `dnsmasq@<zone>` units. Management networking was left
+untouched on both — `vmbr0` and the default route via `10.64.62.1`.
+
+Before removal `pve1` carried the zone `virtnet` with seven VNets: `prov0`,
+the hand-built `vnet0`/`vnet1`, and four section networks (`t101c011`,
+`t101c112`, `t101c123`, `t101c213`) built from `data/environments/school-lab.yml`.
+`pve2` carried its own separate `virtnet` with `prov0`, `vnet0` and `vnet1` —
+the two hosts are not clustered, so each had an independent SDN.
+
+**Why:** the design was exploratory and the decision was that it is not worth
+carrying into the rebuild. Removal was zero-impact — nothing was attached to
+any VNet. CT `800` is on `vmbr0` and every VM is NIC-less by convention
+(`8ae9823`), so the SDN was serving no guest at the time it was deleted.
+
+**The repo still builds all of it.** `controller-bootstrap-sdn.yml` and the
+section definitions in `data/environments/` are unchanged and a single run
+recreates the whole topology. Treat that playbook as a description of an
+intended design, not of either host's current state.
+
+Two things worth knowing before rebuilding SDN:
+
+- **Subnet deletion is blocked by IPAM allocations.** On `pve2` the delete
+  failed with `cannot delete subnet '10.30.0.0/24', not empty` until the
+  entries were released with `pvesh delete /cluster/sdn/vnets/<vnet>/ips`. The
+  allocations were stale — they named VMIDs `900`, `9002`, `9003`, `9004`,
+  which live on `pve1`, not `pve2`. IPAM state outlives the guests it
+  describes and is not reconciled against them.
+- **The zone cannot be deleted before its VNets**, and a VNet cannot be
+  deleted before its subnets. Order is subnets, then VNets, then zone, then
+  `pvesh set /cluster/sdn` to apply.
+
 ---
 
 ## Hardware-gated backlog
@@ -148,7 +185,7 @@ is *iteration cost*: a bad run costs a rebuild, not data. So these items are
 better batched into one lab session than spread across several cautious ones,
 and a failed run is an acceptable outcome rather than something to avoid.
 
-Two cautions survive the pivot:
+Three cautions survive the pivot:
 
 - **Capture before wiping, and verify the capture from a second machine.** The
   facts are cheap to save and expensive to rediscover.
@@ -157,6 +194,13 @@ Two cautions survive the pivot:
   trade for a development host. It makes the destination credential-bearing,
   and it means rotating credentials *after* any actual restore. A district
   deployment should use `--no-secrets` instead.
+- **`pve2` is no longer fully disposable.** It holds the only rollback path for
+  the decommissioned `www.farmcardscode.org` — VM `500`, its snapshot
+  `pre-decommission-20260805`, and a capture of the Cloudflare tunnel
+  credentials and `farmcardscode.env`, none of which exist in the site's GitHub
+  repo. All of it lives on `pve2` itself. **Wiping `pve2` without first copying
+  those off destroys the ability to bring the site back.** See
+  `docs/bootstrap-checklist.md`.
 
 Suggested order for the first session after the wipe: capture and verify, then
 wipe, then the Phase 0 run twice — because a clean install on a genuinely

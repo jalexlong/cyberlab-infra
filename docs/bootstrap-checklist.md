@@ -114,6 +114,37 @@ umount /mnt/usb
 Then fill in the Required Inputs above **from the capture**, not from memory,
 and proceed to Phase 0A.
 
+## Captures currently on the hosts (2026-08-05)
+
+Taken before the SDN teardown. Both are **still on the hosts they describe**,
+which does not satisfy the rule above — they have not been verified from a
+second machine, and a wipe would take the capture with it.
+
+| Host | Path | Size |
+|---|---|---|
+| `pve1` (10.64.62.200) | `/root/cyberlab-capture-pre-sdn-teardown` | ~668 KB |
+| `pve2` (10.64.62.201) | `/root/cyberlab-capture-pve2-pre-sdn-teardown` | ~60 KB |
+
+Both include `/etc/pve/priv/`, so both are credential-bearing.
+
+**`pve2`'s capture is not replaceable.** Under `www-farmcardscode/` it holds
+the Cloudflare tunnel credentials (`cert.pem`, the tunnel JSON, `config.yml`)
+and `/etc/farmcardscode.env` for the decommissioned `www.farmcardscode.org`.
+None of that is in the site's GitHub repo — the repo has the application, not
+its deployment identity. Together with VM `500`'s snapshot
+`pre-decommission-20260805`, also on `pve2`, it is the only path back to a
+running site. Copy it off before `pve2` is wiped.
+
+### Known gap in captures taken before `ebc4c1a`
+
+`capture-host-state.sh` recorded subnets from `/cluster/sdn/subnets`, which is
+not a real endpoint — Proxmox addresses subnets per VNet. Affected captures
+contain the string `No 'get' handler defined for '/cluster/sdn/subnets'` in
+`facts/sdn-subnets.txt` instead of any gateway, DHCP range or SNAT flag. The
+`pve1` capture above was backfilled by hand and is complete. The raw
+`/etc/pve/sdn/*.cfg` files under `config/pve/` were never affected and remain
+the authoritative record.
+
 ---
 
 # Phase 0A: Proxmox Host Bootstrap

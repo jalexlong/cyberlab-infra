@@ -125,6 +125,52 @@ That checkpoint proves:
 - provisioning VNet `prov0` exists
 - Debian 13 template promotion works
 
+### Live run: 2026-08-05, `pve1`
+
+Run from CT `800` at `25c3a0c`, against `pve1` (Proxmox 9.1.9). This is a
+record of what was actually exercised, not a new checkpoint — the Phase 0 exit
+criterion was not attempted.
+
+Confirmed working:
+
+- controller → host connectivity, both `localhost` and `pve1` (`ansible -m ping`)
+- `--syntax-check` on `host-bootstrap.yml`, `controller-bootstrap-sdn.yml`,
+  `controller-validate-template-clone.yml` and
+  `controller-build-template-pipeline.yml`
+- `controller-bootstrap-sdn.yml` end to end against live SDN, `failed=0`
+- the dnsmasq zone-service assertion added in `25c3a0c`
+
+**The dnsmasq defect was real, and the host's journal proves it.** `pve1`
+recorded `dnsmasq@virtnet` failing at 14:03:46 with `failed to create listening
+socket for 10.0.12.1: Address already in use` — the exact symptom the fix
+describes — and entering `active` at 14:05:44 once the stock `dnsmasq.service`
+was disabled by hand. At that point one `dnsmasq@virtnet` process held `:53` on
+all seven VNet gateway addresses and `:67` for DHCP.
+
+**What this run did and did not prove.** The host was already in the remediated
+state before the playbook ran, so the new assertion was observed passing on a
+healthy host. Its failure path — the message a future operator actually reads
+when the stock service is holding `:53` — was never exercised. Likewise
+`host-bootstrap.yml`'s disable task ran against a service that was already
+disabled, so only its idempotent case is proven. Both want a run on a host
+where the defect is present.
+
+**Re-running `controller-bootstrap-sdn.yml` reports `changed=3` on an
+unchanged host.** The three are `Reconcile settings on existing subnets`,
+`Apply SDN configuration` and `Reload networking`. All three are `command`
+tasks with `changed_when: <rc> == 0`, so they report changed whenever they
+succeed. This is cosmetic rather than drift, but it is exactly the class of
+task the deferred `no-changed-when` lint rule targets — the apply and reload
+are arguably correct as written, the subnet reconcile is worth a second look.
+See the lint retirements in `docs/roadmap.md`.
+
+Not exercised: the validation clone plan and full pipeline below. The session
+turned to teardown before they were run.
+
+**These SDN results are now historical.** All SDN was removed from both hosts
+later the same day, so `prov0` and the section VNets no longer exist. The
+checkpoint above still describes what the code proved when it ran.
+
 ---
 
 ## Current syntax-checked but not live-tested work
