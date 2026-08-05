@@ -153,8 +153,8 @@ Environment-specific deployment mapping.
 
 Examples:
 
+* `data/environments/demo-lab.yml`
 * `data/environments/school-lab.yml`
-* `data/environments/thinkcentre-lab.yml`
 
 These files define:
 

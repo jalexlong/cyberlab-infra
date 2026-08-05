@@ -110,6 +110,47 @@ a validation that fails. Worth a CI check in Phase 1.
   working host, so each should be retired with a hardware run behind it. See
   `.ansible-lint`.
 
+### Known hazard: `proxmox-sdn.yml` is stale and contradicts the working path
+
+It hardcodes `sdn_zone: "cyberlab"`, but the platform's zone is `virtnet`
+(`ansible/inventory.yml`, and the promoted-template milestone).
+`controller-bootstrap-sdn.yml` is the current, tested path and reads the zone
+from `proxmox_sdn.zone.name`. Running `proxmox-sdn.yml` against a live host
+would create a **second, divergent SDN zone** alongside the real one.
+
+It was previously inert by accident — it targeted `hosts: poseidon`, which is
+absent from inventory, so it ran zero tasks. Retargeting it to
+`proxmox_targets` to satisfy the inventory check made it genuinely runnable
+against `pve1`. **Do not run this playbook.** It should be deleted (the repo
+has precedent — `template_env.py`, `build-imported-templates.sh`,
+`create-installer-template-vms.sh`) or rewritten to consume `proxmox_sdn`
+rather than its own constants. Decide before the next hardware session.
+
+---
+
+## Hardware-gated backlog
+
+Everything below is deliberately deferred because it cannot be verified from a
+laptop. Collected here so a lab session has one list to work from rather than
+five phases to re-read.
+
+| Item | Why it needs hardware | Where |
+|---|---|---|
+| Two consecutive clean `install-cyberlab.sh` runs on a wiped host; token performs a privileged action | The Phase 0 exit criterion. The defect fixes are correct by inspection only, and `set_fact` parsing of `pveum` output is exactly the kind of thing that reviews clean and surprises live | Phase 0 |
+| Retire `fqcn` from `.ansible-lint` `skip_list` | Mechanical, but touches nearly every playbook at once | Phase 1 |
+| Retire `no-changed-when` | Several hits are genuine idempotency bugs, several are correct as written (reconcile tasks that really do change state each run). Needs per-task judgement plus a run to confirm | Phase 1 |
+| Retire `risky-shell-pipe` | `set -o pipefail` changes failure semantics of shell tasks that currently tolerate a failing pipe stage | Phase 1 |
+| Retire `name` | Cosmetic; safe to do any time, but bundle it with a run | Phase 1 |
+| Resolve `proxmox-sdn.yml` (delete or rewrite) | Deciding is a laptop task; confirming nothing depended on it wants a host | Above |
+| Measure real per-VM and per-LXC RAM | Every sizing number in this document is an estimate | Phase 3 |
+| Right-size `slots.yml` from those measurements | See the RAM budget section — currently ~22.5 GB/student | Phase 3/4 |
+| Validate the template pipeline end to end offline | prepare → finalize → promote → validate, plus a deliberately broken image failing the gate | Phase 2 |
+| Noise under load, power draw on one circuit, thermals | Product requirements, not nice-to-haves | Phase 3 |
+
+Laptop-doable items that came out of the same work, for contrast: the
+catalog/licensing cleanup, `data/labs.yml`, the factory/site split audit, and
+the pod-engine design.
+
 ---
 
 ## Architecture
@@ -181,9 +222,39 @@ Full VMs, lean sizing, roughly 6 GB per 3-VM pod:
 **Four nodes at 64 GB is the recommended starting point** for a 30-student
 target. Three nodes is a fine 16-20 student pilot and the minimum for quorum.
 
-Note that the current `slots.yml` values are far too generous for this
-hardware — `atk` alone is 4 vCPU / 8 GB, which would be 240 GB at 30
-concurrent. Right-sizing is mandatory, not optional.
+The current `slots.yml` values are far more generous than this hardware can
+carry, and by a wider margin than "`atk` is 8 GB" suggests. Measured against
+the file as it stands:
+
+| Slot | vCPU | RAM |
+|---|---|---|
+| `atk` | 4 | 8192 MB |
+| `win` | 2 | 8192 MB |
+| `srv` | 2 | 2048 MB |
+| `vic` | 2 | 2048 MB |
+| `www` | 2 | 2048 MB |
+| **Total per student** | **12** | **22.5 GB** |
+
+That is **~660 GB at 30 concurrent students** — roughly 2.6× a 4-node × 64 GB
+cluster, and unreachable on the DDR3 tier at any node count.
+
+Two separate corrections are needed, and they are easy to conflate:
+
+1. **Sizing.** Individual slot values are too large.
+2. **Shape.** The RAM budget above costs a *3-VM pod*; `slots.yml` defines
+   *five* slots. Even correctly-sized slots overshoot if every student gets all
+   five. Decide whether a pod is a subset of slots chosen per lab — which is
+   what `data/labs.yml` should express — or whether the slot list itself
+   shrinks.
+
+Right-sizing is mandatory, not optional, and per-slot numbers should come from
+the Phase 3 measurement rather than from estimates.
+
+`slots.yml` also names `win7-template` and `metasploitable2-template`, the two
+images the content-licensing table below says cannot ship. Removing them from
+the catalog forces a `slots.yml` change; `tests/test_inventory_consistency.py`
+enforces that the two files agree, so CI will flag it rather than letting the
+slots dangle.
 
 ### Density: use Proxmox LXC, not a second hypervisor
 

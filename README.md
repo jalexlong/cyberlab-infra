@@ -139,8 +139,8 @@ cyberlab-infra/
 │   ├── slots.yml
 │   ├── policy.yml
 │   └── environments/
-│       ├── school-lab.yml
-│       └── thinkcentre-lab.yml
+│       ├── demo-lab.yml
+│       └── school-lab.yml
 ├── ansible/
 │   ├── inventory.yml
 │   ├── playbooks/
