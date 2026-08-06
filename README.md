@@ -146,6 +146,8 @@ ansible-playbook -i inventory.yml playbooks/controller-build-template-pipeline.y
 ```text
 cyberlab-infra/
 ├── README.md
+├── LICENSE                     # Apache 2.0
+├── NOTICE
 ├── pyproject.toml              # ruff + pytest config
 ├── requirements-dev.txt        # lint/test tooling
 ├── .yamllint / .ansible-lint   # linter config
@@ -159,6 +161,7 @@ cyberlab-infra/
 │   ├── network-isolation.md    # egress suppression and firewall design
 │   ├── platform-pipeline.md
 │   ├── recovery.md
+│   ├── repair-posture.md       # right-to-repair, licensing, admin panel
 │   ├── template-lifecycle.md
 │   └── testing.md
 ├── data/
@@ -461,6 +464,22 @@ document. In short:
   plus Guacamole rather than per-student Proxmox identities; OpenTofu has been
   dropped — Ansible plus a control plane covers the need, and a declarative IaC
   tool is a poor fit for pods created and destroyed many times a day.
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Permissive on purpose: a district refurbishing its own e-waste into a cluster
+should hit no legal friction, and the recipe is the product. Apache rather than
+MIT for the explicit patent grant and the trademark reservation — the risk this
+project actually carries is a fork keeping the name while dropping the
+isolation and PII tests, which are safety claims. The reasoning, the rejected
+alternatives, and the still-open documentation licence are in
+[docs/repair-posture.md](docs/repair-posture.md).
+
+This project is built on Proxmox VE (AGPLv3) and bundles Apache Guacamole
+(Apache 2.0). Distributing assembled hardware carries Proxmox's source-offer
+obligations regardless of this repository's own license.
 
 ## Notes for future me
 

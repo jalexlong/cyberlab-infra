@@ -4,8 +4,11 @@ Planning document for taking this repository from its current state to a
 self-contained, classroom-deployable cyber range appliance.
 
 **Written:** 2026-08-04
-**Last revised:** 2026-08-05 — student-network question resolved, package cache
-promoted to Phase 2.5, network isolation designed (`docs/network-isolation.md`)
+**Last revised:** 2026-08-06 — repair posture recorded
+(`docs/repair-posture.md`), cluster build sequence added to Phase 3
+**Previously revised:** 2026-08-05 — student-network question resolved, package
+cache promoted to Phase 2.5, network isolation designed
+(`docs/network-isolation.md`)
 **Originally analyzed at commit:** `5dd0092`
 **Target:** own classroom pilot spring 2027, appliance design by summer 2027
 **Not on the critical path:** this supplements the Cyber.org curriculum.
@@ -40,6 +43,14 @@ Two delivery paths:
 | **Recipe** | Public BOM, install automation, documentation | You distribute no software — no GPL/AGPL obligation attaches |
 | **Prebuilt** | Assembled, imaged, tested hardware | You distribute Proxmox — source-offer and trademark obligations apply |
 
+**Revised 2026-08-06: the recipe is the product, and the prebuilt SKU is a
+convenience rather than the primary path.** Every unit is a factory — any owner
+can build templates, and "update" means re-running the recipe rather than
+awaiting a bundle. This removes the vendor dependency the factory/site split
+would otherwise have created, and it makes a district sourcing its own e-waste
+a first-class user rather than a fallback. See `docs/repair-posture.md`, which
+also carries the licence analysis and the admin-panel design.
+
 **Design principle that makes this work:** the prebuilt units must be
 reproducible from the public recipe. If the box a district buys is exactly the
 free recipe applied to hardware, then GPL/AGPL compliance is close to
@@ -60,6 +71,10 @@ proprietary fork.
 - Your own control plane and playbooks are **not** infected. Code calling `qm`
   across an API boundary is a separate work; GPL explicitly permits mere
   aggregation.
+- **This repository is Apache 2.0 as of 2026-08-06** (`LICENSE`, `NOTICE`).
+  That choice does not touch any obligation above — they attach to distributing
+  Proxmox, not to licensing this code. Reasoning and rejected alternatives are
+  in `docs/repair-posture.md`.
 
 ---
 
@@ -284,6 +299,7 @@ is air-gapping, not wiping.
 | Retire `no-changed-when` | Several hits are genuine idempotency bugs, several are correct as written (reconcile tasks that really do change state each run). Needs per-task judgement plus a run to confirm | Phase 1 |
 | Retire `risky-shell-pipe` | `set -o pipefail` changes failure semantics of shell tasks that currently tolerate a failing pipe stage | Phase 1 |
 | Retire `name` | Cosmetic; safe to do any time, but bundle it with a run | Phase 1 |
+| Confirm `pvecm add` refuses a node holding guests, and settle how templates reach every node's local storage | The cluster build sequence below is designed around a refusal this project has not yet seen. If it does not refuse, the ordering is merely preferable rather than mandatory — worth knowing which | Phase 3 |
 | Measure real per-VM and per-LXC RAM | Every sizing number in this document is an estimate | Phase 3 |
 | Right-size `slots.yml` from those measurements | See the RAM budget section — currently ~22.5 GB/student | Phase 3/4 |
 | Validate the template pipeline end to end offline | prepare → finalize → promote → validate, plus a deliberately broken image failing the gate | Phase 2 |
@@ -1115,6 +1131,57 @@ BOM consequence: one USB3 gigabit adapter for the uplink node, or a candidate
 model that takes an internal second NIC (verify per model; prefer internal).
 One adapter for the cluster, not one per node. The port count above already
 assumes no uplink port is consumed.
+
+#### Cluster build sequence — cluster first, then templates
+
+Recorded here rather than in `docs/repair-posture.md` so there is one
+authoritative ordering. It matters more than it used to: the build path is now
+something a stranger performs, not something the author performs.
+
+**The intuitive order is wrong, and it fails at the last step after the slowest
+work is already spent.** Bringing each node up individually on a wall port,
+building its templates, and clustering the finished nodes at the end runs into
+a refusal: `pvecm add` will not join a node that already holds guests.
+Templates are guests — they carry VMIDs, and VMIDs are cluster-unique — so the
+join is rejected on every node that has been built. **Not yet verified on this
+hardware**; it is in the backlog table above precisely because the sequence
+below is designed around it.
+
+Inverting it is also less work, because only one node ever needs the district
+uplink and only one node ever builds:
+
+```text
+ 1. CLUSTER THE BARE NODES         all empty, so the constraint is met trivially
+      node1 ─┐
+      node2 ─┼── unmanaged switch, no uplink
+      node3 ─┘
+
+ 2. ONE NODE TAKES THE UPLINK      second NIC, per docs/network-isolation.md
+      wall port ──> node1 vmbr0
+
+ 3. BUILD TEMPLATES ONCE, ON node1 prov0 + snat; the existing pipeline,
+                                   unchanged
+
+ 4. DISTRIBUTE TO EACH NODE        over vmbr1. Linked clones need the template
+                                   on the same storage as the clone
+
+ 5. GENERATE the control plane, the access layer, and the admin panel
+```
+
+Properties worth keeping: one template build rather than one per node, no
+transitional topology to construct and then undo, no node ever plugged into a
+wall port except the one that keeps that connection permanently, and `/etc/pve`
+is cluster-replicated before anything needs to write firewall rules into it.
+
+**Step 4's mechanism is unsettled and is the real open question.** With no
+shared storage, a guest lives on one node, so "the template is on every node's
+local storage" cannot mean one VMID appearing in several places. The plausible
+answer is a distinct VMID per node per template — **the same shape as the
+package cache reserving `801-805`, one per node, for exactly this reason.** At
+five templates across five nodes that is 25 IDs against the 50 reserved in
+`900-949`, so the range holds, but `data/bootstrap-policy.yml` should say so
+deliberately rather than leaving it to arithmetic. Settle it alongside the
+`pvecm` verification, since both need the same lab session.
 
 #### Rack
 

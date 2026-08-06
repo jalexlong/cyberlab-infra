@@ -1,0 +1,13 @@
+Proxmox Cyberlab Infra
+Copyright 2026 J. Alex Long
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+This project is built on Proxmox VE, which is licensed separately under the
+GNU Affero General Public License v3. Distributing assembled hardware carries
+that licence's source-offer obligations; this project's own licence does not
+change them. See docs/roadmap.md.
+
+Proxmox and Proxmox VE are trademarks of Proxmox Server Solutions GmbH. This
+project is not affiliated with, endorsed by, or sponsored by Proxmox Server
+Solutions GmbH.
