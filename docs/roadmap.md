@@ -1606,12 +1606,18 @@ is the state that session left behind, then what is next.
    negative assertions included: the cache answers on 3142 and refuses tcp/22
    and ICMP.
 
-   **Still owed: applying the generated rules.**
-   `controller-bootstrap-firewall.yml` has *not* been run on `pve1`, which
-   still carries the hand-placed set. The assertion pass proves the two agree
-   on every property asserted; it does not prove the generated files are
-   byte-equivalent. Diff them before the swap, and expect the generalised
-   per-teacher `/16` DROP to be a real difference rather than a defect
+   **Diffed against the hand-placed rules, same day.** `--check --diff` on
+   `pve1` shows `host.fw` and both guest `.fw` files **identical at the rule
+   level**, and `cluster.fw` differing only in `[ALIASES]` — the generated set
+   drops the unreferenced `schoolnet` and adds an unreferenced `svcnet`. No
+   rule references either, so the generated configuration is behaviourally
+   identical to what is running. Both guests already carry `firewall=1`, so the
+   swap would touch no NIC and disturb no lease.
+
+   **Still owed: actually applying it.**
+   `controller-bootstrap-firewall.yml` has not been run outside check mode, so
+   `pve1` still runs the hand-placed set. Given the diff, this is now a low-risk
+   step rather than an unknown one
 5. **Bake the cache client config into the template images.** The proxy line
    *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
    `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest

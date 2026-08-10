@@ -366,11 +366,47 @@ assertions that matter most: the cache answers on `3142` and refuses `22` and
 ICMP.
 
 This is the assertion half proving itself against a state that was
-independently measured. It is *not* proof that the generated files match the
-hand-placed ones byte for byte, because
-`controller-bootstrap-firewall.yml` has not been run here yet. Diff the two
-before swapping, and expect one real difference: the generalised per-teacher
-`/16` DROP replaces the hardcoded `10.101.0.0/16`.
+independently measured.
+
+### The generated rules, diffed against the hand-placed ones
+
+`controller-bootstrap-firewall.yml` supports `--check --diff`, which is the
+supported way to preview it against a live host. Read-only discovery tasks
+carry `check_mode: false` so the per-guest diffs are real rather than empty:
+
+```bash
+ansible-playbook -i inventory.yml playbooks/controller-bootstrap-firewall.yml \
+  --check --diff
+```
+
+Run against `pve1` on 2026-08-10, comparing rule directives only and ignoring
+comments and blank lines:
+
+| File | Result |
+|---|---|
+| `host.fw` | **Rules identical** — 12 directives, same order |
+| `950.fw` / `955.fw` | **Rules identical** — 9 directives each |
+| `cluster.fw` | One difference, in `[ALIASES]` only |
+
+The `cluster.fw` difference is that the generated file drops
+`schoolnet 10.64.62.0/23` and adds `svcnet 10.31.0.0/24`. **Neither alias is
+referenced by any rule** — `grep` across every `.fw` on the host finds only
+`dc/cache` and `dc/provnet` in use, and `mgmt` is unreferenced too. So the
+generated configuration is behaviourally identical to what is running.
+
+Two things this diff settles that were open:
+
+- **The per-teacher `/16` generalisation is a no-op today.** `school-lab` has
+  one teacher, so the derived DROP is exactly the hand-placed
+  `10.101.0.0/16`. It was expected to be the one real difference and is not;
+  it only starts to matter when a second teacher appears, which is the point.
+- **No NIC would be touched.** Both lab guests already carry `firewall=1`, so
+  the MAC-preserving `qm set` is skipped entirely — the swap cannot disturb a
+  DHCP lease or an IPAM binding.
+
+`schoolnet` is the one piece of information the swap would lose. It is
+documentation rather than policy, and re-deriving it needs the host's own
+management prefix at runtime, so it is deliberately not carried today.
 
 ---
 

@@ -123,6 +123,11 @@
       register: nft_backend_present
       changed_when: false
       failed_when: false
+      # Read-only, so it must still run under --check. Ansible skips command
+      # and shell tasks in check mode by default, which would leave the facts
+      # below undefined and make `--check --diff` -- the way this playbook is
+      # meant to be previewed against a live host -- report nothing at all.
+      check_mode: false
 
     - name: Mask the nftables firewall backend
       ansible.builtin.systemd_service:
@@ -144,6 +149,7 @@
           - hostname
       register: node_name_result
       changed_when: false
+      check_mode: false
 
     - name: Record the node name
       ansible.builtin.set_fact:
@@ -304,6 +310,7 @@
         done
       register: guest_nics
       changed_when: false
+      check_mode: false
       when: cyberlab_firewall_manage_guests | bool
 
     - name: Parse the section VNet each lab guest sits on
@@ -410,6 +417,7 @@
           - status
       register: firewall_status
       changed_when: false
+      check_mode: false
 
     - name: Require the firewall to be running
       ansible.builtin.assert:
