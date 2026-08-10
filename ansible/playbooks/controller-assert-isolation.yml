@@ -1,0 +1,506 @@
+---
+# Prove the Cyberlab isolation policy is in force.
+#
+# Phase 5 requires isolation to be proven CONTINUOUSLY. What existed before
+# this playbook was /root/fixprobe.sh on pve1: a measurement someone performed
+# once, by hand, on one host, with every address hardcoded. This is that probe,
+# generalised over the data model and made re-runnable.
+#
+# Two tiers, and the distinction matters:
+#
+#   Tier 1 -- CONFIGURATION assertions. Read-only, needs no guests, runs in
+#             seconds. This is the tier that runs on every deploy. It cannot
+#             prove a packet was dropped, but it catches every failure where
+#             something looks configured and is not, which is the failure mode
+#             that actually happened: three of the five traps recorded on
+#             2026-08-07 were exactly that.
+#
+#   Tier 2 -- LIVE REACHABILITY probes, from inside a real lab guest, against
+#             the nine targets in the measured results table. This is the tier
+#             that proves policy rather than configuration. It needs a running
+#             guest with the QEMU guest agent, so it is opt-in.
+#
+# A passing tier 1 with tier 2 never run is a WEAKER claim than the one made on
+# 2026-08-07, and the summary at the end says so rather than reporting green.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml
+#   ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml \
+#     -e cyberlab_probe_vmid=950 -e cyberlab_probe_peer_ip=10.101.11.101
+
+- name: Assert the Cyberlab isolation policy is in force
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars:
+    cyberlab_env: school-lab
+
+    # Tier 2. A VMID of a running lab guest with the guest agent, and the
+    # address of a second guest in the SAME section to use as the control.
+    #
+    # The control must be guest-to-guest. "Ping your own gateway" is NOT a
+    # valid intra-section control: the section gateway is the host, and the
+    # lab-subnet DROP in host.fw blocks it deliberately. Using the gateway
+    # reports a broken firewall when the firewall is correct -- trap 5 of five,
+    # 2026-08-07.
+    cyberlab_probe_vmid: ""
+    cyberlab_probe_peer_ip: ""
+
+    cyberlab_cache_svc_ip: 10.31.0.10
+    cyberlab_cache_port: 3142
+
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    env_sections: "{{ environment_data.environment.sections | default({}) }}"
+    mgmt_address: "{{ environment_data.environment.proxmox.api_host }}"
+
+    section_vnet_names: "{{ env_sections.values() | map(attribute='vnet') | list }}"
+    section_subnets: "{{ env_sections.values() | map(attribute='subnet') | list | sort }}"
+    # split, not a regex backreference -- see the note in
+    # controller-bootstrap-firewall.yml. A '\1' that fails to substitute here
+    # would fail every host.fw assertion below for a reason that has nothing to
+    # do with the host being checked.
+    lab_supernets: >-
+      {%- set out = [] -%}
+      {%- for subnet in section_subnets -%}
+      {%-   set octets = subnet.split('.') -%}
+      {%-   set _ = out.append(octets[0] ~ '.' ~ octets[1] ~ '.0.0/16') -%}
+      {%- endfor -%}
+      {{ out | unique | list | sort }}
+
+    prov_gateway: >-
+      {{
+        ((proxmox_sdn.subnets | default([]))
+         | selectattr('name', 'equalto', 'prov0')
+         | map(attribute='gateway') | list + ['10.30.0.1']) | first
+      }}
+
+  tasks:
+    # ===================================================================
+    # Tier 1: configuration assertions.
+    # ===================================================================
+    - name: Read the firewall service status
+      ansible.builtin.command:
+        argv:
+          - pve-firewall
+          - status
+      register: fw_status
+      changed_when: false
+      failed_when: false
+
+    - name: Require the legacy firewall to be enabled and running
+      ansible.builtin.assert:
+        that:
+          - "'Status: enabled/running' in (fw_status.stdout | default(''))"
+        fail_msg: >-
+          pve-firewall reports '{{ (fw_status.stdout | default('no output')) | trim }}'.
+          Isolation is NOT in force regardless of what the .fw files contain.
+          Run controller-bootstrap-firewall.yml.
+        success_msg: "pve-firewall: enabled/running"
+
+    - name: Read the nftables backend unit state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-enabled
+          - proxmox-firewall.service
+      register: nft_backend_state
+      changed_when: false
+      failed_when: false
+
+    # Both backends consume the same .fw files, so a half-live nftables backend
+    # does not look like a configuration error -- it looks like isolation. On
+    # 2026-08-07 proxmox-firewall failed to populate its guest maps while its
+    # bridge table still default-dropped, which reads exactly like a working
+    # firewall until you notice the CONTROL has failed too.
+    - name: Require the nftables backend to be masked or absent
+      ansible.builtin.assert:
+        that:
+          - (nft_backend_state.stdout | trim) in ('masked', 'not-found', '')
+        fail_msg: >-
+          proxmox-firewall.service is '{{ nft_backend_state.stdout | trim }}',
+          not masked. Two backends consuming the same .fw files can produce a
+          firewall that is broken CLOSED, which is indistinguishable from
+          working isolation until the control test also fails.
+        success_msg: "nftables backend: {{ nft_backend_state.stdout | trim | default('absent', true) }}"
+
+    - name: Read cluster.fw
+      ansible.builtin.slurp:
+        src: /etc/pve/firewall/cluster.fw
+      register: cluster_fw_raw
+
+    - name: Decode cluster.fw
+      ansible.builtin.set_fact:
+        cluster_fw: "{{ cluster_fw_raw.content | b64decode }}"
+
+    - name: Require the datacenter firewall to be enabled with both policies default-deny
+      ansible.builtin.assert:
+        that:
+          - cluster_fw is search('(?m)^enable:\s*1\s*$')
+          - cluster_fw is search('(?m)^policy_in:\s*DROP\s*$')
+          - cluster_fw is search('(?m)^policy_out:\s*DROP\s*$')
+        fail_msg: >-
+          cluster.fw must carry enable: 1, policy_in: DROP and policy_out: DROP.
+          policy_out is the one that matters most here: inbound-only default-deny
+          still lets a lab guest reach the management address, every other
+          section, and a recursive resolver. Measured 2026-08-07.
+        success_msg: "cluster.fw: enabled, policy_in DROP, policy_out DROP"
+
+    - name: Require the lab-guest security group to exist
+      ansible.builtin.assert:
+        that:
+          - cluster_fw is search('(?m)^\[group lab-guest\]')
+        fail_msg: >-
+          cluster.fw declares no [group lab-guest]. Per-guest .fw files
+          reference it by name, and a GROUP line naming a group that does not
+          exist leaves those guests with policy DROP and no carve-outs -- the
+          cache stops answering and apt breaks mid-class.
+
+    - name: Require the cache carve-out to be a host AND a port
+      ansible.builtin.assert:
+        that:
+          - cluster_fw is search('OUT ACCEPT -dest dc/cache -p tcp -dport ' ~ cyberlab_cache_port)
+        fail_msg: >-
+          The package cache carve-out must name both a destination and a port.
+          Allowing the cache host alone exposes everything else listening on
+          that container -- SSH included -- to every student in the building.
+          Verified 2026-08-07: 3142 answers, 22 and ICMP do not.
+        success_msg: "cache carve-out: {{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}, port-scoped"
+
+    # The single most valuable negative assertion in this playbook. DNS was the
+    # finding nobody predicted: the zone's dnsmasq is a fully recursive
+    # resolver, reachable from every lab guest, and it exfiltrates over a
+    # channel that no egress rule touches. It will be tempting for a future
+    # maintainer to "fix" guest name resolution by adding port 53 back.
+    - name: Require port 53 to remain absent from the lab-guest group
+      ansible.builtin.assert:
+        that:
+          - not (lab_guest_group is search('dport\s+53'))
+          - not (lab_guest_group is search('dport\s+[0-9,:]*\b53\b'))
+        fail_msg: >-
+          The lab-guest group permits port 53. The SDN zone's dnsmasq is a
+          fully RECURSIVE resolver, so this is not "name resolution for
+          students" -- it is an unmonitored data-exfiltration channel out of an
+          otherwise air-gapped lab, and it defeats the entire default-deny.
+          Lab guests need no DNS: the apt proxy is configured by address.
+          Measured 2026-08-07. If a lab genuinely needs resolution, give the
+          zone a forwarder that is not recursive and re-open this deliberately.
+        success_msg: "port 53: absent from lab-guest, as required"
+      vars:
+        lab_guest_group: >-
+          {{ (cluster_fw.split('[group lab-guest]') | last) if '[group lab-guest]' in cluster_fw else '' }}
+
+    - name: Resolve this node's name
+      ansible.builtin.command:
+        argv:
+          - hostname
+      register: node_name_result
+      changed_when: false
+
+    - name: Record the node name
+      ansible.builtin.set_fact:
+        node_name: "{{ node_name_result.stdout | trim }}"
+
+    - name: Read host.fw
+      ansible.builtin.slurp:
+        src: "/etc/pve/nodes/{{ node_name }}/host.fw"
+      register: host_fw_raw
+
+    - name: Decode host.fw
+      ansible.builtin.set_fact:
+        host_fw_lines: "{{ (host_fw_raw.content | b64decode).splitlines() }}"
+
+    - name: Require the host to drop traffic from every lab supernet
+      ansible.builtin.assert:
+        that:
+          - host_fw_lines | select('search', 'IN DROP -source ' ~ (item | regex_escape)) | list | length > 0
+        fail_msg: >-
+          host.fw has no `IN DROP -source {{ item }}`, so guests in that teacher's
+          sections can reach the host itself. The hand-placed rules covered
+          10.101.0.0/16 only; lab space is 10.<teacher_id>.<section_code>.0/24
+          across teacher_id 101-255, so every teacher in
+          {{ cyberlab_env }} needs their own /16 dropped.
+      loop: "{{ lab_supernets }}"
+
+    - name: Require host DHCP accepts in both directions
+      ansible.builtin.assert:
+        that:
+          - host_fw_lines | select('search', '^OUT ACCEPT -p udp -dport 67:68') | list | length > 0
+          - host_fw_lines | select('search', '^IN ACCEPT -p udp -dport 67:68') | list | length > 0
+        fail_msg: >-
+          host.fw must ACCEPT udp/67:68 both inbound and outbound. The zone's
+          dnsmasq runs ON the host, so every DHCP OFFER is host-OUTBOUND;
+          without the OUT rule dnsmasq logs "Operation not permitted" and no
+          guest on any VNet ever gets an address.
+
+    # Ordering, not presence. This one is invisible at boot and fails minutes
+    # into a class, which is the worst possible time to discover it.
+    - name: Require the inbound DHCP accept to precede the lab-subnet drop
+      ansible.builtin.assert:
+        that:
+          - (dhcp_in_index | int) >= 0
+          - (dhcp_in_index | int) < (first_lab_drop_index | int)
+        fail_msg: >-
+          host.fw has `IN ACCEPT -p udp -dport 67:68` at line {{ (dhcp_in_index | int) + 1 }}
+          but drops lab traffic to the host at line {{ (first_lab_drop_index | int) + 1 }}.
+          Rules are evaluated in order. A RENEWING DHCP client sources from its
+          already-leased 10.<teacher>.<section>.x address, so with this ordering
+          leases work at boot and fail at renewal -- guests lose their addresses
+          part-way through a lesson while every static check still passes.
+          Measured 2026-08-07.
+        success_msg: "host.fw ordering: DHCP accept precedes the lab-subnet drop"
+      vars:
+        dhcp_in_line: >-
+          {{ host_fw_lines | select('search', '^IN ACCEPT -p udp -dport 67:68')
+             | list | first | default('', true) }}
+        lab_drop_line: >-
+          {{ host_fw_lines | select('search', '^IN DROP -source 10\.')
+             | list | first | default('', true) }}
+        dhcp_in_index: "{{ host_fw_lines.index(dhcp_in_line) if dhcp_in_line else -1 }}"
+        first_lab_drop_index: "{{ host_fw_lines.index(lab_drop_line) if lab_drop_line else 99999 }}"
+      when: host_fw_lines | select('search', '^IN DROP -source 10\.') | list | length > 0
+
+    # ---------------------------------------------------------------
+    # Per-guest state. Requested (firewall=1) and applied (<vmid>.fw) are
+    # stored in different places, and a guest with one and not the other is
+    # unfiltered while looking configured.
+    # ---------------------------------------------------------------
+    - name: Discover every guest NIC on this node
+      ansible.builtin.shell: |
+        set -o pipefail
+        for cfg in /etc/pve/nodes/{{ node_name }}/qemu-server/*.conf \
+                   /etc/pve/nodes/{{ node_name }}/lxc/*.conf; do
+          [ -e "$cfg" ] || continue
+          vmid="$(basename "$cfg" .conf)"
+          grep -E '^net[0-9]+:' "$cfg" | while IFS= read -r line; do
+            printf '%s|%s|%s\n' "$vmid" "${line%%:*}" "${line#*: }"
+          done
+        done
+      register: all_nics
+      changed_when: false
+
+    - name: Split guest NICs into lab and non-lab
+      ansible.builtin.set_fact:
+        parsed_nics: "{{ all_nics.stdout_lines | map('split', '|') | list }}"
+
+    - name: Select the NICs attached to a section VNet
+      ansible.builtin.set_fact:
+        lab_nics: >-
+          {{
+            parsed_nics
+            | selectattr('2', 'search', 'bridge=(' ~ (section_vnet_names | join('|')) ~ ')(,|$)')
+            | list
+          }}
+        lab_vmids: >-
+          {{
+            parsed_nics
+            | selectattr('2', 'search', 'bridge=(' ~ (section_vnet_names | join('|')) ~ ')(,|$)')
+            | map(attribute=0) | unique | list | sort
+          }}
+
+    - name: Require every lab NIC to carry the firewall flag
+      ansible.builtin.assert:
+        that:
+          - item.2 is search('firewall=1')
+        fail_msg: >-
+          Guest {{ item.0 }} NIC {{ item.1 }} is on a section VNet without
+          firewall=1, so none of the rules in cluster.fw or
+          {{ item.0 }}.fw are applied to it. The policy is present, correct,
+          and not in force. Fix by rewriting the NIC line WITH its existing
+          MAC -- `qm set {{ item.0 }} --{{ item.1 }} '{{ item.2 }},firewall=1'`
+          -- because a bare `qm set --{{ item.1 }} virtio,bridge=...`
+          regenerates the MAC and invalidates the lease, the IPAM binding and
+          the firewall's own MAC-source filter.
+      loop: "{{ lab_nics }}"
+      loop_control:
+        label: "{{ item.0 }} {{ item.1 }}"
+
+    - name: Require no lab guest to be bridged to a physical network
+      ansible.builtin.assert:
+        that:
+          - not (item.2 is search('bridge=vmbr[0-9]'))
+        fail_msg: >-
+          Guest {{ item.0 }} is a lab guest with NIC {{ item.1 }} on a physical
+          bridge. Lab guests attach to pod VNets only. A `simple` zone bridge
+          has no physical port, which is the structural reason Windows
+          broadcast noise cannot leave the lab -- bridging a lab guest to
+          vmbr0/vmbr1 removes that guarantee entirely.
+      loop: "{{ parsed_nics | selectattr('0', 'in', lab_vmids) | list }}"
+      loop_control:
+        label: "{{ item.0 }} {{ item.1 }}"
+
+    - name: Stat the per-guest firewall policy for every lab guest
+      ansible.builtin.stat:
+        path: "/etc/pve/firewall/{{ item }}.fw"
+      register: guest_fw_stats
+      loop: "{{ lab_vmids }}"
+
+    - name: Require every lab guest to have an applied policy file
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: >-
+          Guest {{ item.item }} sits on a section VNet with firewall=1 but has
+          no /etc/pve/firewall/{{ item.item }}.fw, so it is running UNFILTERED
+          WHILE LOOKING CONFIGURED. `qm destroy --purge` deletes this file, so
+          any rebuilt guest lands here. Re-run
+          controller-bootstrap-firewall.yml.
+      loop: "{{ guest_fw_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read each lab guest's policy
+      ansible.builtin.slurp:
+        src: "/etc/pve/firewall/{{ item }}.fw"
+      register: guest_fw_raw
+      loop: "{{ lab_vmids }}"
+
+    - name: Require each lab guest policy to default-deny and join the lab-guest group
+      ansible.builtin.assert:
+        that:
+          - body is search('(?m)^enable:\s*1\s*$')
+          - body is search('(?m)^policy_in:\s*DROP\s*$')
+          - body is search('(?m)^policy_out:\s*DROP\s*$')
+          - body is search('(?m)^GROUP lab-guest\s*$')
+        fail_msg: >-
+          /etc/pve/firewall/{{ item.item }}.fw does not default-deny and join
+          the lab-guest group. Without GROUP lab-guest the guest loses the
+          package cache carve-out; without policy_out DROP it keeps egress.
+      loop: "{{ guest_fw_raw.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      vars:
+        body: "{{ item.content | b64decode }}"
+
+    # A guest may only be opened to its OWN section. This is the assertion that
+    # catches a copy-pasted .fw file -- which is exactly how these were placed
+    # by hand, and how 955 ended up carrying section A's subnet after being
+    # moved for a control test.
+    - name: Require each lab guest to permit only its own section subnet
+      ansible.builtin.assert:
+        that:
+          - body is search('OUT ACCEPT -dest ' ~ (own_subnet | regex_escape))
+          - body is search('IN ACCEPT -source ' ~ (own_subnet | regex_escape))
+          - foreign_subnets | length == 0
+        fail_msg: >-
+          {{ item.item }}.fw does not match the VNet the guest is actually on.
+          Expected only {{ own_subnet }}
+          {% if foreign_subnets %}
+          but it also permits {{ foreign_subnets | join(', ') }}, which is a
+          cross-section hole: two sections that can reach each other are one
+          section as far as a student is concerned.
+          {% else %}
+          and that subnet is not permitted at all, so the guest cannot reach
+          its own classmates and the lab looks broken rather than isolated.
+          {% endif %}
+      loop: "{{ guest_fw_raw.results }}"
+      loop_control:
+        label: "{{ item.item }} -> {{ own_subnet }}"
+      vars:
+        body: "{{ item.content | b64decode }}"
+        own_vnet: >-
+          {{ ((lab_nics | selectattr('0', 'equalto', item.item | string) | map(attribute=2) | first)
+              .split(',') | select('match', 'bridge=') | first).split('=')[1] }}
+        own_subnet: >-
+          {{ env_sections.values() | selectattr('vnet', 'equalto', own_vnet)
+             | map(attribute='subnet') | first }}
+        foreign_subnets: >-
+          {{ section_subnets | reject('equalto', own_subnet)
+             | select('in', body) | list }}
+
+    # ---------------------------------------------------------------
+    # SNAT. Phase 2.5's air-gap claim depends on this and it is cheap to check.
+    # ---------------------------------------------------------------
+    - name: Read the subnets on each section VNet
+      ansible.builtin.command:
+        argv:
+          - pvesh
+          - get
+          - "/cluster/sdn/vnets/{{ item }}/subnets"
+          - --output-format
+          - json
+      register: section_subnet_state
+      changed_when: false
+      failed_when: false
+      loop: "{{ section_vnet_names | sort }}"
+
+    - name: Require no section subnet to carry SNAT
+      ansible.builtin.assert:
+        that:
+          - snat_enabled | length == 0
+        fail_msg: >-
+          Section VNet {{ item.item }} has SNAT enabled on
+          {{ snat_enabled | join(', ') }}. Note that snat: false is NOT what
+          isolates a lab -- the firewall is -- but snat: true actively grants
+          address translation to the district network, so this is a hole with
+          no upside.
+      loop: "{{ section_subnet_state.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      vars:
+        snat_enabled: >-
+          {{ (item.stdout | default('[]') | from_json)
+             | selectattr('snat', 'defined') | selectattr('snat', 'in', [1, '1', true])
+             | map(attribute='subnet') | list }}
+      when: item.rc == 0
+
+    # ===================================================================
+    # Tier 2: live reachability probes from inside a lab guest.
+    # ===================================================================
+    - name: Note that the live probe was not requested
+      ansible.builtin.debug:
+        msg: >-
+          TIER 2 SKIPPED. Configuration is consistent, but no packet was sent.
+          Pass -e cyberlab_probe_vmid=<vmid> -e cyberlab_probe_peer_ip=<ip of a
+          second guest in the SAME section> to run the reachability matrix that
+          produced the 2026-08-07 results.
+      when: not (cyberlab_probe_vmid | string | length > 0)
+
+    - name: Require a same-section control peer for the live probe
+      ansible.builtin.assert:
+        that:
+          - cyberlab_probe_peer_ip | string | length > 0
+        fail_msg: >-
+          cyberlab_probe_vmid was given without cyberlab_probe_peer_ip. The
+          probe needs a guest-to-guest control: a run where everything is
+          "blocked" is indistinguishable from a run where the guest simply has
+          no network, and the gateway cannot serve as the control because the
+          host deliberately drops lab traffic.
+      when: cyberlab_probe_vmid | string | length > 0
+
+    - name: Run the reachability matrix inside guest {{ cyberlab_probe_vmid }}
+      ansible.builtin.script:
+        cmd: >-
+          {{ repo_root }}/scripts/isolation-probe.sh
+          --vmid {{ cyberlab_probe_vmid }}
+          --peer {{ cyberlab_probe_peer_ip }}
+          --mgmt {{ mgmt_address }}
+          --cache {{ cyberlab_cache_svc_ip }}
+          --cache-port {{ cyberlab_cache_port }}
+          --prov-gateway {{ prov_gateway }}
+          --sections {{ section_subnets | join(',') }}
+      register: probe_result
+      changed_when: false
+      failed_when: probe_result.rc != 0
+      when: cyberlab_probe_vmid | string | length > 0
+
+    - name: Show the reachability matrix
+      ansible.builtin.debug:
+        msg: "{{ (probe_result.stdout | default('')).splitlines() }}"
+      when: cyberlab_probe_vmid | string | length > 0
+
+    - name: Summarise the isolation verdict
+      ansible.builtin.debug:
+        msg:
+          - "node: {{ node_name }}"
+          - "environment: {{ cyberlab_env }}"
+          - "lab guests checked: {{ lab_vmids | join(', ') | default('none', true) }}"
+          - >-
+            tier 1 (configuration): PASS
+          - >-
+            tier 2 (live packets):
+            {{ 'PASS' if (cyberlab_probe_vmid | string | length > 0) else
+               'NOT RUN -- this run proves the policy is CONFIGURED, not that it
+                WORKS. The two came apart on 2026-08-07 and that is the whole
+                reason this playbook exists.' }}

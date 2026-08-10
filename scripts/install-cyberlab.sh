@@ -22,6 +22,8 @@ readonly HOST_BOOTSTRAP_PLAYBOOK="playbooks/host-bootstrap.yml"
 readonly CONTROLLER_VALIDATE_PLAYBOOK="playbooks/controller-validate-proxmox-api.yml"
 readonly CONTROLLER_SDN_PLAYBOOK="playbooks/controller-bootstrap-sdn.yml"
 readonly CONTROLLER_PACKAGE_CACHE_PLAYBOOK="playbooks/controller-bootstrap-package-cache.yml"
+readonly CONTROLLER_FIREWALL_PLAYBOOK="playbooks/controller-bootstrap-firewall.yml"
+readonly CONTROLLER_ISOLATION_PLAYBOOK="playbooks/controller-assert-isolation.yml"
 readonly DETECT_CONTROLLER_NETWORK_SCRIPT_REL="scripts/detect-controller-network.sh"
 readonly CONTROLLER_NETWORK_VARS_REL="private/generated/controller-network.yml"
 readonly CONTROLLER_CTID_DEFAULT="800"
@@ -41,6 +43,12 @@ SKIP_SDN_BOOTSTRAP="${CYBERLAB_SKIP_SDN_BOOTSTRAP:-0}"
 # Opt-in, not opt-out. The package cache is Phase 2.5 work and is off until it
 # is proven on the target hardware, the same way section VNets are.
 WITH_PACKAGE_CACHE="${CYBERLAB_WITH_PACKAGE_CACHE:-0}"
+# Opt-in for the same reason the package cache is, plus one of its own: this
+# writes a default-deny firewall to a live host. It is off until an operator
+# asks for it, and asking for it also runs the isolation assertions, because
+# writing the rules and proving they are in force are not the same claim --
+# that gap is exactly what 2026-08-07 measured.
+WITH_FIREWALL="${CYBERLAB_WITH_FIREWALL:-0}"
 QUIET="${CYBERLAB_QUIET:-0}"
 
 usage() {
@@ -60,6 +68,7 @@ Options:
   --skip-controller-validate  Do not run controller API validation playbook
   --skip-sdn-bootstrap        Do not run controller SDN bootstrap playbook
   --with-package-cache        Build the apt-cacher-ng package cache LXC (off by default)
+  --with-firewall             Write the isolation firewall and assert it (off by default)
   --rotate-api-token          Force recreation of the Proxmox API token and rewrite controller secret
   -q, --quiet                 Reduce status output
   -h, --help                  Show this help
@@ -75,6 +84,7 @@ Environment overrides:
   CYBERLAB_SKIP_CONTROLLER_VALIDATE=0|1
   CYBERLAB_SKIP_SDN_BOOTSTRAP=0|1
   CYBERLAB_WITH_PACKAGE_CACHE=0|1
+  CYBERLAB_WITH_FIREWALL=0|1
 
 Network detector pass-through examples:
   CYBERLAB_CONTROLLER_VLAN=99 ${SCRIPT_NAME}
@@ -232,6 +242,10 @@ parse_args() {
         WITH_PACKAGE_CACHE=1
         shift
         ;;
+      --with-firewall)
+        WITH_FIREWALL=1
+        shift
+        ;;
       --rotate-api-token)
 	ROTATE_API_TOKEN=1
 	shift
@@ -315,6 +329,8 @@ assert_repo_layout() {
   assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${HOST_BOOTSTRAP_PLAYBOOK}"
   assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_VALIDATE_PLAYBOOK}"
   assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_SDN_PLAYBOOK}"
+  assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_FIREWALL_PLAYBOOK}"
+  assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_ISOLATION_PLAYBOOK}"
   assert_file "${REPO_DIR}/${DETECT_CONTROLLER_NETWORK_SCRIPT_REL}"
 }
 
@@ -410,6 +426,23 @@ run_controller_package_cache() {
   run_controller_playbook "${CONTROLLER_PACKAGE_CACHE_PLAYBOOK}"
 }
 
+# Two playbooks, always together and always in this order. Writing the rules is
+# not the same claim as the rules being in force: on 2026-08-07 a host carried
+# a correct rule set that was not applied to a single guest, because the flag
+# requesting filtering and the file supplying the policy are separate state.
+run_controller_firewall() {
+  if [[ "${WITH_FIREWALL}" != "1" ]]; then
+    log "Skipping firewall bootstrap (pass --with-firewall to enable)"
+    log "  NOTE: without it this host has an SDN and no isolation. Lab guests"
+    log "  can reach the management address, each other's sections, and a"
+    log "  recursive resolver. See docs/network-isolation.md."
+    return 0
+  fi
+
+  run_controller_playbook "${CONTROLLER_FIREWALL_PLAYBOOK}"
+  run_controller_playbook "${CONTROLLER_ISOLATION_PLAYBOOK}"
+}
+
 show_runtime_summary() {
   log "Runtime configuration:"
   log "  repo_dir=${REPO_DIR}"
@@ -445,6 +478,7 @@ $(phase_line 0 "Controller SSH trust bootstrap")
 $(phase_line "${SKIP_CONTROLLER_VALIDATE}" "Proxmox API validation from controller")
 $(phase_line "${SKIP_SDN_BOOTSTRAP}" "SDN zone and VNET bootstrap")
 $(phase_line "$((1 - WITH_PACKAGE_CACHE))" "Package cache LXC (Phase 2.5)")
+$(phase_line "$((1 - WITH_FIREWALL))" "Isolation firewall + assertions (Phase 5)")
 
 Useful checks:
   pct status ${CONTROLLER_CTID}
@@ -489,6 +523,7 @@ main() {
   run_controller_validation
   run_controller_sdn_bootstrap
   run_controller_package_cache
+  run_controller_firewall
   show_success_summary
 }
 

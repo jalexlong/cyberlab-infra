@@ -1,0 +1,439 @@
+---
+# Write the Cyberlab firewall isolation policy.
+#
+# This playbook exists because the isolation measured and enforced on pve1 on
+# 2026-08-07 was placed BY HAND. `install-cyberlab.sh` rebuilt the SDN and the
+# package cache on a wiped host and produced a lab that looked complete and was
+# not isolated at all. Everything here is the reproduction of that hand work,
+# derived from the data model rather than transcribed, so a second teacher or a
+# second node does not need a human editing `.fw` files.
+#
+# The rule set is the one MEASURED to work, in docs/network-isolation.md under
+# "Enforced and verified", not the larger design sketch further down that
+# document. The design sketch references a cluster network, Guacamole and an
+# admin-host IPSET that exist on no host yet; writing those now would produce
+# rules nobody has ever tested. This playbook writes what was proven and leaves
+# the rest to the phase that builds it.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-firewall.yml
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-firewall.yml -e cyberlab_env=demo-lab
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-firewall.yml -e cyberlab_firewall_enable=false
+#
+# Verify the result with controller-assert-isolation.yml, which is a separate
+# playbook precisely so it can run when this one has not.
+
+- name: Bootstrap the Cyberlab firewall isolation policy
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars:
+    cyberlab_env: school-lab
+
+    # The escape hatch. Setting this false writes every rule but leaves
+    # `enable: 0` in cluster.fw, so the policy can be staged and read on a host
+    # before it starts dropping packets. Isolation is the point of the phase,
+    # so the default is on.
+    cyberlab_firewall_enable: true
+
+    # Whether to reconcile per-guest `.fw` files and the `firewall=1` NIC flag.
+    # Both halves matter and they are stored separately -- see the guest tasks
+    # below for why that separation is the single most dangerous thing here.
+    cyberlab_firewall_manage_guests: true
+
+    # The package cache carve-out. Must match controller-bootstrap-package-cache.yml,
+    # which is where this address is assigned.
+    cyberlab_cache_svc_ip: 10.31.0.10
+    cyberlab_cache_port: 3142
+
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    env_sections: "{{ environment_data.environment.sections | default({}) }}"
+
+    mgmt_address: "{{ environment_data.environment.proxmox.api_host }}"
+
+    infra_subnets: "{{ proxmox_sdn.subnets | default([]) }}"
+    prov_subnet: >-
+      {{
+        (infra_subnets | selectattr('name', 'equalto', 'prov0') | map(attribute='subnet') | list
+         + ['10.30.0.0/24']) | first
+      }}
+    svc_subnet: >-
+      {{
+        (infra_subnets | selectattr('name', 'equalto', 'svc0') | map(attribute='subnet') | list
+         + ['10.31.0.0/24']) | first
+      }}
+
+    # Every section subnet declared for this environment, sorted so a rewrite
+    # of an unchanged data model produces a byte-identical file and the copy
+    # task reports `ok` rather than `changed`.
+    section_subnets: "{{ env_sections.values() | map(attribute='subnet') | list | sort }}"
+
+    # The lab supernets, derived rather than hardcoded.
+    #
+    # The hand-placed host.fw carried `IN DROP -source 10.101.0.0/16` with a
+    # comment admitting it covered teacher_id 101 only, because lab space is
+    # 10.<teacher_id>.<section_code>.0/24 across teacher_id 101-255. Deriving
+    # one /16 per teacher present in the environment closes that gap exactly:
+    # add a teacher to the data model and the DROP that hides the host from
+    # their sections appears with them.
+    #
+    # Written with split rather than a regex backreference deliberately. A
+    # '\1' replacement has to survive YAML quoting AND Jinja's own string
+    # escape decoding, and the two do not agree: the same literal substitutes
+    # correctly through a direct filter call and comes out as the uninterpreted
+    # text '\1' through map(). Both failures are silent -- regex_replace still
+    # returns a string, and the copy task still writes a firewall file.
+    lab_supernets: >-
+      {%- set out = [] -%}
+      {%- for subnet in section_subnets -%}
+      {%-   set octets = subnet.split('.') -%}
+      {%-   set _ = out.append(octets[0] ~ '.' ~ octets[1] ~ '.0.0/16') -%}
+      {%- endfor -%}
+      {{ out | unique | list | sort }}
+
+  tasks:
+    - name: Require the environment to declare at least one section
+      ansible.builtin.assert:
+        that:
+          - env_sections | length > 0
+        fail_msg: >-
+          {{ environment_file }} declares no sections, so this playbook would
+          write a firewall with no lab subnets to isolate. That is almost
+          certainly the wrong environment file rather than a lab with no
+          classes in it.
+
+    # ---------------------------------------------------------------------
+    # Backend.
+    #
+    # Legacy pve-firewall, decided 2026-08-07: Proxmox marks proxmox-firewall
+    # as tech preview and "not suited for production use", and on this host it
+    # logged `cannot execute nftables commands` every five seconds while its
+    # bridge table still default-dropped guest traffic. A firewall broken
+    # CLOSED, which reads exactly like working isolation until you notice the
+    # control has failed too.
+    # ---------------------------------------------------------------------
+    - name: Check whether the nftables firewall backend is installed
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - list-unit-files
+          - proxmox-firewall.service
+      register: nft_backend_present
+      changed_when: false
+      failed_when: false
+
+    - name: Mask the nftables firewall backend
+      ansible.builtin.systemd_service:
+        name: proxmox-firewall
+        state: stopped
+        enabled: false
+        masked: true
+      when: "'proxmox-firewall.service' in (nft_backend_present.stdout | default(''))"
+
+    - name: Ensure the legacy firewall service is enabled
+      ansible.builtin.systemd_service:
+        name: pve-firewall
+        state: started
+        enabled: true
+
+    - name: Resolve this node's name
+      ansible.builtin.command:
+        argv:
+          - hostname
+      register: node_name_result
+      changed_when: false
+
+    - name: Record the node name
+      ansible.builtin.set_fact:
+        node_name: "{{ node_name_result.stdout | trim }}"
+
+    - name: Require the node to exist in the Proxmox cluster filesystem
+      ansible.builtin.stat:
+        path: "/etc/pve/nodes/{{ node_name }}"
+      register: node_dir
+
+    - name: Fail when the node directory is absent
+      ansible.builtin.assert:
+        that:
+          - node_dir.stat.exists
+        fail_msg: >-
+          /etc/pve/nodes/{{ node_name }} does not exist, so `hostname` does not
+          match this host's Proxmox node name and host.fw would be written to a
+          path the firewall never reads.
+
+    # ---------------------------------------------------------------------
+    # host.fw is written BEFORE cluster.fw, deliberately.
+    #
+    # cluster.fw is what sets `enable: 1`. Writing it first would switch
+    # enforcement on during the window before the host's own SSH and 8006
+    # accepts exist. Proxmox does provide default management accepts, so this
+    # ordering is belt-and-braces rather than the only thing standing between
+    # this playbook and a locked-out host -- but the cost of the ordering is
+    # zero and the cost of being wrong is a drive to the server room.
+    # ---------------------------------------------------------------------
+    - name: Write the host firewall policy
+      ansible.builtin.copy:
+        dest: "/etc/pve/nodes/{{ node_name }}/host.fw"
+        owner: root
+        group: www-data
+        mode: "0640"
+        content: |
+          # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
+          #
+          # Host-level policy. Note that host.fw rejects policy_in and policy_out
+          # as unparseable -- they are datacenter- and guest-level options only,
+          # so host policy is the Proxmox defaults plus the explicit rules below.
+
+          [OPTIONS]
+
+          enable: 1
+          log_level_in: nolog
+          log_level_out: nolog
+
+          [RULES]
+
+          # DHCP first, and both directions.
+          #
+          # The zone's dnsmasq runs ON the host, so every OFFER is host-OUTBOUND;
+          # without this rule dnsmasq logs "Error sending DHCP packet: Operation
+          # not permitted" and guests sit with no address forever.
+          #
+          # The inbound half must sit ABOVE the lab-subnet DROP below, because a
+          # renewing client sources from its leased 10.<teacher>.<section>.x
+          # address. Ordered wrongly, leases work at boot and fail at renewal --
+          # minutes into a class. Both measured 2026-08-07.
+          OUT ACCEPT -p udp -dport 67:68 -log nolog # DHCP replies to all VNets
+          IN ACCEPT -p udp -dport 67:68 -log nolog # DHCP for all VNets
+
+          # Defence in depth. Guest-level policy_out DROP should already stop
+          # this, but it is the assertion most likely to be quietly wrong, so
+          # both. One rule per teacher /16 present in {{ cyberlab_env }}.
+          {% for supernet in lab_supernets %}
+          IN DROP -source {{ supernet }} -log info # lab subnets never reach the host
+          {% endfor %}
+
+          # Management access. Deliberately not scoped by source: the admin
+          # laptop moves between subnets, and scoping these to the school
+          # network would have locked the operator out on 2026-08-07.
+          IN SSH(ACCEPT) -log nolog
+          IN ACCEPT -p tcp -dport 8006 -log nolog # Proxmox Web UI
+          IN ACCEPT -p icmp -log nolog
+
+          # Template builds on prov0 need DNS from the VNet gateway. prov0 is
+          # factory-time infrastructure, not a student-facing network. Section
+          # VNets get no DNS at all -- see the cluster.fw note on port 53.
+          IN ACCEPT -source dc/provnet -p udp -dport 53 -log nolog
+
+    - name: Write the datacenter firewall policy
+      ansible.builtin.copy:
+        dest: /etc/pve/firewall/cluster.fw
+        owner: root
+        group: www-data
+        mode: "0640"
+        content: |
+          # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
+          #
+          # Cyberlab datacenter firewall. Isolation enforcement per
+          # docs/network-isolation.md and roadmap Phase 5. Enforced at each
+          # guest's own tap/veth interface, so isolation does not depend on how
+          # permissively the host routes between VNets -- and the host does
+          # route between them, because the SDN requires net.ipv4.ip_forward=1.
+
+          [OPTIONS]
+
+          enable: {{ 1 if (cyberlab_firewall_enable | bool) else 0 }}
+          policy_in: DROP
+          policy_out: DROP
+
+          [ALIASES]
+
+          mgmt {{ mgmt_address }} # Proxmox management address
+          provnet {{ prov_subnet }} # Factory-time provisioning network
+          svcnet {{ svc_subnet }} # Site-time service network
+          cache {{ cyberlab_cache_svc_ip }} # Package cache on svc0
+
+          [group lab-guest] # Default-deny lab guest. Carve-outs are unidirectional.
+
+          # Carve-out 1: the package cache. A host AND a port, never a host
+          # alone -- allowing the host would expose anything else listening on
+          # that container to every student in the building. Verified
+          # 2026-08-07: 3142 answers, 22 and ICMP on the same container do not.
+          OUT ACCEPT -dest dc/cache -p tcp -dport {{ cyberlab_cache_port }} -log nolog
+
+          # DHCP so leases can renew.
+          OUT ACCEPT -p udp -dport 67:68 -log nolog
+
+          # Port 53 is deliberately absent. Measured 2026-08-07: the zone's
+          # dnsmasq is a fully recursive resolver with tcp/53 open, reachable
+          # from every lab guest, which is a live data-exfiltration channel.
+          # The explicit apt proxy removes any need for guest DNS, so this is
+          # refused outright rather than left as the one hole in a default-deny.
+
+    # ---------------------------------------------------------------------
+    # Per-guest policy.
+    #
+    # Two pieces of state, stored in two places, and BOTH are required:
+    #
+    #   1. `firewall=1` on the NIC, in the guest config. This REQUESTS
+    #      filtering.
+    #   2. /etc/pve/firewall/<vmid>.fw. This is the policy that gets applied.
+    #
+    # A guest with (1) and without (2) comes up UNFILTERED AND LOOKING
+    # CONFIGURED. That is not hypothetical: `qm destroy --purge` deletes the
+    # .fw file, so any rebuild lands exactly there. Three of the five traps
+    # recorded on 2026-08-07 were this failure class.
+    # ---------------------------------------------------------------------
+    - name: Discover guests attached to a section VNet
+      ansible.builtin.shell: |
+        set -o pipefail
+        for cfg in /etc/pve/nodes/{{ node_name }}/qemu-server/*.conf \
+                   /etc/pve/nodes/{{ node_name }}/lxc/*.conf; do
+          [ -e "$cfg" ] || continue
+          vmid="$(basename "$cfg" .conf)"
+          kind=qemu
+          case "$cfg" in */lxc/*) kind=lxc ;; esac
+          # Pipe-separated: a NIC config line contains commas and equals signs
+          # but never a pipe, and a literal tab would not survive the trip
+          # through YAML and Jinja intact.
+          grep -E '^net[0-9]+:' "$cfg" | while IFS= read -r line; do
+            key="${line%%:*}"
+            printf '%s|%s|%s|%s\n' "$vmid" "$kind" "$key" "${line#*: }"
+          done
+        done
+      register: guest_nics
+      changed_when: false
+      when: cyberlab_firewall_manage_guests | bool
+
+    - name: Parse the section VNet each lab guest sits on
+      ansible.builtin.set_fact:
+        # One entry per NIC that is bridged to a VNet this environment
+        # declares. A guest on prov0, svc0 or vmbr0 is deliberately not a lab
+        # guest and is left alone.
+        lab_nics: >-
+          {{
+            (guest_nics.stdout_lines | default([]))
+            | map('split', '|')
+            | selectattr('3', 'search', 'bridge=(' ~ (section_vnet_names | join('|')) ~ ')(,|$)')
+            | list
+          }}
+      vars:
+        section_vnet_names: "{{ env_sections.values() | map(attribute='vnet') | list }}"
+      when: cyberlab_firewall_manage_guests | bool
+
+    - name: Show the lab guests this run will reconcile
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'lab guests: ' ~ (lab_nics | map(attribute=0) | unique | list | sort | join(', '))
+            if (lab_nics | default([]) | length) > 0
+            else 'No guest is attached to a section VNet. Rules are written and
+                  enforcing, but nothing is subject to them yet -- this is the
+                  expected state before the pod engine exists.'
+          }}
+      when: cyberlab_firewall_manage_guests | bool
+
+    - name: Write the per-guest firewall policy
+      ansible.builtin.copy:
+        dest: "/etc/pve/firewall/{{ item.0 }}.fw"
+        owner: root
+        group: www-data
+        mode: "0640"
+        content: |
+          # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
+          #
+          # Deleted by `qm destroy --purge`. A rebuilt guest that keeps
+          # firewall=1 on its NIC but loses this file comes back unfiltered and
+          # looking configured, so re-run this playbook after any rebuild.
+
+          [OPTIONS]
+
+          enable: 1
+          dhcp: 1
+          policy_in: DROP
+          policy_out: DROP
+
+          [RULES]
+
+          GROUP lab-guest
+          OUT ACCEPT -dest {{ vnet_subnet }} -log nolog
+          IN ACCEPT -source {{ vnet_subnet }} -log nolog
+      loop: "{{ lab_nics | default([]) }}"
+      loop_control:
+        label: "{{ item.0 }} ({{ item.1 }}) on {{ vnet_subnet }}"
+      vars:
+        vnet_name: >-
+          {{ (item.3.split(',') | select('match', 'bridge=') | first).split('=')[1] }}
+        vnet_subnet: >-
+          {{
+            env_sections.values()
+            | selectattr('vnet', 'equalto', vnet_name)
+            | map(attribute='subnet') | first
+          }}
+      when: cyberlab_firewall_manage_guests | bool
+
+    # `firewall=1` is set by REWRITING THE WHOLE NIC LINE, existing MAC
+    # included. `qm set --net0 virtio,bridge=X` without the MAC regenerates it,
+    # which invalidates the DHCP lease, the SDN IPAM binding, and the
+    # MAC-source filter the firewall itself installs -- so the guest loses its
+    # address and every subsequent probe returns "blocked" for reasons that
+    # have nothing to do with policy. That trap cost a full round of wrong
+    # measurements on 2026-08-07.
+    - name: Enable the firewall flag on lab NICs, preserving the MAC
+      ansible.builtin.command:
+        argv:
+          - "{{ 'qm' if item.1 == 'qemu' else 'pct' }}"
+          - set
+          - "{{ item.0 }}"
+          - "--{{ item.2 }}"
+          - "{{ item.3 }},firewall=1"
+      loop: "{{ lab_nics | default([]) }}"
+      loop_control:
+        label: "{{ item.0 }} {{ item.2 }}"
+      when:
+        - cyberlab_firewall_manage_guests | bool
+        - not (item.3 is search('firewall=1'))
+
+    - name: Apply the firewall configuration
+      ansible.builtin.command:
+        argv:
+          - pve-firewall
+          - restart
+      register: firewall_restart
+      changed_when: firewall_restart.rc == 0
+
+    - name: Read back the firewall status
+      ansible.builtin.command:
+        argv:
+          - pve-firewall
+          - status
+      register: firewall_status
+      changed_when: false
+
+    - name: Require the firewall to be running
+      ansible.builtin.assert:
+        that:
+          - "'Status: enabled/running' in firewall_status.stdout"
+        fail_msg: >-
+          pve-firewall reports '{{ firewall_status.stdout | trim }}' rather than
+          enabled/running. The rules on disk are therefore not the rules in
+          force. If this host previously ran the nftables backend, unmask and
+          check it before assuming the configuration is at fault.
+        success_msg: "pve-firewall is enabled and running."
+      when: cyberlab_firewall_enable | bool
+
+    - name: Summarise what was written
+      ansible.builtin.debug:
+        msg:
+          - "node: {{ node_name }}"
+          - "environment: {{ cyberlab_env }}"
+          - "enforcing: {{ cyberlab_firewall_enable | bool }}"
+          - "lab supernets dropped at the host: {{ lab_supernets | join(', ') }}"
+          - "cache carve-out: {{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }} only"
+          - >-
+            guests reconciled:
+            {{ lab_nics | default([]) | map(attribute=0) | unique | list | sort | join(', ') | default('none', true) }}
+          - >-
+            Rules are written. Nothing here proves they WORK -- run
+            controller-assert-isolation.yml for that.

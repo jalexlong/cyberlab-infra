@@ -278,17 +278,99 @@ before a second teacher exists.
 - **Guacamole's carve-out**, which does not exist yet. It points the opposite
   way to the cache — Guacamole initiates *into* pod VNets — and that asymmetry
   is what makes both testable.
-- **The isolation test is a shell script, not something that runs on deploy.**
-  Phase 5 requires a test that runs every time. What exists today is a
-  measurement someone performed once.
 - **`policy_out: DROP` was never verified for the host itself**, only for
   guests.
+- **The cable has still not been pulled.** Stripping the cache's egress
+  interface is strictly weaker than the physical test.
 
 ### Rig teardown
 
 Guests `950` and `955` are disposable and destroyed with
 `qm stop <id> && qm destroy <id> --purge`. The section VNets they used were
 created by the standard playbook and can be removed subnets → VNets → zone.
+
+---
+
+## Reproducing this from the repository, 2026-08-10
+
+Everything above was placed **by hand**. A wiped host running
+`install-cyberlab.sh` came back with the SDN and the package cache and **no
+isolation at all** — a lab that looks complete from the commit log and lets
+any student reach the Proxmox Web UI. That gap is now closed by two playbooks
+and a script.
+
+| File | What it does |
+|---|---|
+| `ansible/playbooks/controller-bootstrap-firewall.yml` | Writes `cluster.fw`, `host.fw` and every per-guest `.fw`, derived from `data/environments/<env>.yml` |
+| `ansible/playbooks/controller-assert-isolation.yml` | Checks that the policy is present *and in force* |
+| `scripts/isolation-probe.sh` | The measured reachability matrix, re-runnable, judged rather than eyeballed |
+
+`install-cyberlab.sh --with-firewall` runs the first two, in that order,
+always together. Both are opt-in for the same reason the package cache is,
+plus one of their own: this writes a default-deny firewall to a live host.
+
+### What is derived rather than transcribed
+
+- **One host DROP per teacher `/16`**, taken from the section subnets the
+  environment declares. The hand-placed rule covered `teacher_id` 101 only and
+  carried a comment saying so; adding a second teacher to the data model now
+  produces their DROP automatically.
+- **Each guest's own section subnet**, read from the VNet the guest is
+  *actually attached to* rather than from a file someone copied. This is what
+  catches the case that really happened: `955` was moved to section A for a
+  control test and kept section A's `.fw` afterwards.
+- **Which guests are lab guests at all** — anything bridged to a section VNet.
+  The controller on `vmbr0` and the cache on `svc0` are deliberately not.
+
+### The two tiers, and why the distinction is load-bearing
+
+`controller-assert-isolation.yml` runs **tier 1** on every deploy: read-only
+configuration assertions that need no guests and finish in seconds. It cannot
+prove a packet was dropped. What it *can* prove is that nothing is in the
+state where it looks configured and is not — which is the state that actually
+occurred, in three of the five traps below.
+
+**Tier 2** is the live matrix, run from inside a guest through the guest
+agent, and it is opt-in because it needs a running lab guest and a
+same-section peer:
+
+```
+ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml \
+  -e cyberlab_probe_vmid=950 -e cyberlab_probe_peer_ip=10.101.11.101
+```
+
+A tier-1 pass with tier 2 never run is a **weaker claim** than the one made on
+2026-08-07, and the playbook's summary says so rather than reporting green.
+
+**The control is treated as pass/fail, not as one row among seventeen.** A run
+where everything is "blocked" is exactly what a guest with no DHCP lease
+reports, and that misreading cost a full round of measurements when a
+regenerated MAC silently dropped a lease. If the same-section peer is
+unreachable, the probe refuses to trust any other verdict and exits non-zero.
+
+### What the repo checks without hardware
+
+`tests/test_firewall_policy.py` guards the rule *shape* in CI, where there is
+no Proxmox host: that port 53 stays out of the `lab-guest` group, that the
+cache carve-out names a port and not just a host, that `host.fw` writes the
+inbound DHCP accept above the lab-subnet DROP, that `host.fw` is written
+before `cluster.fw`, and that a derived teacher `/16` can never swallow the
+`10.30.0.0/24` and `10.31.0.0/24` infrastructure networks.
+
+### Verified against `pve1`, 2026-08-10
+
+`controller-assert-isolation.yml` was run against the live host, which still
+carries the hand-placed rules. **Both tiers passed with zero changes.** Tier 2
+reproduced all seventeen rows from guest `950` — including the negative
+assertions that matter most: the cache answers on `3142` and refuses `22` and
+ICMP.
+
+This is the assertion half proving itself against a state that was
+independently measured. It is *not* proof that the generated files match the
+hand-placed ones byte for byte, because
+`controller-bootstrap-firewall.yml` has not been run here yet. Diff the two
+before swapping, and expect one real difference: the generalised per-teacher
+`/16` DROP replaces the hardcoded `10.101.0.0/16`.
 
 ---
 

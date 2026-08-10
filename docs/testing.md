@@ -57,8 +57,24 @@ what parse-level checks structurally cannot:
   `required_proxmox_privs` in `controller-validate-proxmox-api.yml`, which are
   independent declarations that must match
 - slots in `data/slots.yml` naming templates absent from the catalog
+- the isolation firewall's rule *shape* (`tests/test_firewall_policy.py`): that
+  port 53 stays out of the `lab-guest` group, that the package cache carve-out
+  names a port and not just a host, that `host.fw` accepts inbound DHCP above
+  the lab-subnet DROP, that `host.fw` is written before `cluster.fw`, and that
+  a derived teacher `/16` can never cover `prov0` or `svc0`
 
 Static checks do not prove that Proxmox operations work.
+
+**A caveat that cost real time, worth knowing before writing more of these.**
+`--syntax-check` and `ansible-lint` both pass a playbook whose Jinja is
+silently wrong, because neither evaluates it. A `regex_replace` backreference
+written `'\1'` substitutes correctly through a direct filter call and comes
+back as the uninterpreted text `\1` through `map()` — and `regex_replace`
+returns a string either way, so the firewall file is still written, just with
+garbage in it. Where a derivation matters, exercise it: build a throwaway
+playbook that feeds the real expression realistic fixtures and asserts the
+result. That is how the two `\1` defects in the firewall playbooks were caught
+before they reached a host.
 
 ---
 
@@ -101,6 +117,38 @@ Runtime validation includes:
 - validation clone creation
 - validation clone boot
 - validation clone network behavior
+- network isolation, in two tiers (below)
+
+#### Isolation checks
+
+`controller-assert-isolation.yml` is the only check here that is safe to run
+against a production host at any time — tier 1 is read-only:
+
+```bash
+cd ansible
+ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml
+```
+
+That asserts configuration only: the firewall enabled and running on the legacy
+backend, both datacenter policies `DROP`, the `lab-guest` group present with a
+port-scoped cache carve-out and no port 53, one host DROP per teacher `/16`,
+inbound DHCP ordered above it, and — per lab guest — `firewall=1` on the NIC,
+a matching `<vmid>.fw` on disk, and permission for its own section subnet and
+no other.
+
+Tier 2 sends real packets from inside a guest and needs a running lab guest
+with the QEMU guest agent plus a second guest in the same section:
+
+```bash
+ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml \
+  -e cyberlab_probe_vmid=950 -e cyberlab_probe_peer_ip=10.101.11.101
+```
+
+**Tier 1 passing is not the same claim as tier 2 passing.** Configuration and
+enforcement came apart on 2026-08-07 and that is the reason both exist. The
+same-section peer is the control, and it must be guest-to-guest: the section
+gateway is the host, which the lab-subnet DROP blocks deliberately, so using
+the gateway reports a broken firewall when the firewall is correct.
 
 ---
 

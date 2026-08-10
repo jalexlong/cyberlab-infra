@@ -1579,15 +1579,39 @@ is the state that session left behind, then what is next.
    rule set, and five silent gotchas in `docs/network-isolation.md`
 ### Next, in the order that makes sense now
 
-4. **Turn the isolation probe into a test that runs on every deploy.** This is
-   the largest gap the session left. Phase 5 requires isolation to be *proven
-   continuously*; what exists is a shell script someone ran once, by hand, on
-   one host. Its assertions are already written and validated
-   (`docs/network-isolation.md`), so this is packaging rather than design —
-   but until it is automated, the next person to change a VNet, rebuild a
-   guest, or add a section will silently unfilter something. **Three of the
-   five gotchas recorded that day were exactly this failure**: a guest that
-   looked configured and was not
+4. ~~**Turn the isolation probe into a test that runs on every deploy**~~
+   **— done 2026-08-10; the assertions are verified on `pve1`.** The
+   hand-placed rules are
+   now reproduced by `controller-bootstrap-firewall.yml` and checked by
+   `controller-assert-isolation.yml`, both wired into `install-cyberlab.sh`
+   behind `--with-firewall`, which always runs them together. The one-off
+   `/root/fixprobe.sh` became `scripts/isolation-probe.sh`: same matrix, taken
+   from the data model instead of hardcoded, and *judged* rather than
+   eyeballed. Two things worth knowing before relying on it:
+   - **The assertions are in two tiers.** Tier 1 is configuration-only, runs
+     on every deploy, and catches the entire class of "looks configured, is
+     not" — which is what three of the five traps actually were. Tier 2 is the
+     live reachability matrix and is opt-in, because it needs a running guest
+     and a same-section peer. A tier-1 pass alone is a weaker claim than
+     2026-08-07 made, and the playbook says so instead of reporting green
+   - **The `teacher_id` 101 hardcoding is gone.** The host DROP is now one
+     `/16` per teacher present in the environment file, so a second teacher no
+     longer needs anyone to remember. `tests/test_firewall_policy.py` also
+     refuses a `teacher_id` that would derive a supernet covering `prov0` or
+     `svc0`
+
+   **Verified on `pve1`, 2026-08-10.** `controller-assert-isolation.yml` ran
+   against the live host and passed **both tiers with zero changes** — tier 2
+   reproduced all seventeen rows of the 2026-08-07 matrix from guest `950`,
+   negative assertions included: the cache answers on 3142 and refuses tcp/22
+   and ICMP.
+
+   **Still owed: applying the generated rules.**
+   `controller-bootstrap-firewall.yml` has *not* been run on `pve1`, which
+   still carries the hand-placed set. The assertion pass proves the two agree
+   on every property asserted; it does not prove the generated files are
+   byte-equivalent. Diff them before the swap, and expect the generalised
+   per-teacher `/16` DROP to be a real difference rather than a defect
 5. **Bake the cache client config into the template images.** The proxy line
    *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
    `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
@@ -1597,9 +1621,12 @@ is the state that session left behind, then what is next.
 6. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
    Now doubles as the proof that **both** the cache and the firewall are
    reproducible from the installer rather than hand-built artifacts that happen
-   to exist. Note the installer does not yet write any firewall config — the
-   2026-08-07 rules were placed by hand, so this is a real gap between what the
-   host runs and what the recipe builds
+   to exist. As of item 4 the installer *does* write firewall config under
+   `--with-firewall`, so this run is what turns that from written code into a
+   verified claim. Run it against `pve1`'s existing hand-placed rules first:
+   `controller-assert-isolation.yml` alone is read-only, and a clean pass there
+   proves the assertions agree with the state that was actually measured before
+   anything gets rewritten
 7. **Pull the cable.** The one Phase 2.5 exit criterion still owed. Stripping
    the cache's own egress interface is strictly weaker, and the roadmap was
    right to insist on the physical test
@@ -1626,7 +1653,9 @@ Recorded because the next session starts here, not from a clean host:
   future nftables attempt.
 - **Firewall rules were placed by hand**, not by any playbook. They live in
   `/etc/pve/firewall/cluster.fw`, `/etc/pve/nodes/pve1/host.fw`, and per-guest
-  `950.fw`/`955.fw`. Nothing in this repository writes them yet.
+  `950.fw`/`955.fw`. Since 2026-08-10 the repository *can* write them —
+  `controller-bootstrap-firewall.yml` — but has not: the host still runs the
+  hand-placed set, and the two have never been diffed on hardware.
 - **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
   `t101c213`) plus the new `svc0`. They were absent before this session.
 - **CT `801`** runs the package cache, still dual-homed with its `prov0`
