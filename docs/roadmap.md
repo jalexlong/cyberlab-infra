@@ -1608,11 +1608,13 @@ is the state that session left behind, then what is next.
 
    **Diffed against the hand-placed rules, same day.** `--check --diff` on
    `pve1` shows `host.fw` and both guest `.fw` files **identical at the rule
-   level**, and `cluster.fw` differing only in `[ALIASES]` — the generated set
-   drops the unreferenced `schoolnet` and adds an unreferenced `svcnet`. No
-   rule references either, so the generated configuration is behaviourally
-   identical to what is running. Both guests already carry `firewall=1`, so the
-   swap would touch no NIC and disturb no lease.
+   level**, and `cluster.fw` differing by one added, unreferenced alias
+   (`svcnet`). The generated configuration is a strict superset of what is
+   running and behaviourally identical to it. Both guests already carry
+   `firewall=1`, so the swap would touch no NIC and disturb no lease. The
+   `schoolnet` alias — the one thing an earlier draft would have dropped — is
+   now rediscovered from the interface holding the management address, so no
+   site-specific value is hardcoded anywhere in this work
 
    **Still owed: actually applying it.**
    `controller-bootstrap-firewall.yml` has not been run outside check mode, so

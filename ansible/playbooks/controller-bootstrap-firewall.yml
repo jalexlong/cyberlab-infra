@@ -155,6 +155,64 @@
       ansible.builtin.set_fact:
         node_name: "{{ node_name_result.stdout | trim }}"
 
+    # The school network is documentation, not policy -- no rule references it
+    # -- but it records something learned on hardware that is easy to get
+    # wrong: this network is a /23, and reading it as a /24 puts half the
+    # district outside any rule written against it. Losing that on the first
+    # generated write would be a quiet regression, so it is rediscovered
+    # rather than dropped or hardcoded.
+    #
+    # Derived from the interface that actually holds the management address,
+    # not from the default route: on a multi-homed node those differ, and the
+    # alias is meaningless if it names the wrong one.
+    - name: Discover the management network from the host
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress
+            import subprocess
+            import sys
+
+            wanted = ipaddress.ip_address(sys.argv[1])
+            out = subprocess.run(
+                ["ip", "-o", "-4", "addr", "show", "scope", "global"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            for line in out.splitlines():
+                fields = line.split()
+                if len(fields) < 4:
+                    continue
+                try:
+                    iface = ipaddress.ip_interface(fields[3])
+                except ValueError:
+                    continue
+                if iface.ip == wanted:
+                    print(iface.network)
+                    break
+          - "{{ mgmt_address }}"
+      register: mgmt_network_result
+      changed_when: false
+      check_mode: false
+
+    # Empty when the management address is not held locally -- a controller
+    # reaching the API through a NAT or a floating address, say. The alias is
+    # then omitted rather than written empty, because `schoolnet` with no value
+    # is a parse error that takes the whole firewall down with it.
+    - name: Record the management network
+      ansible.builtin.set_fact:
+        schoolnet_cidr: "{{ mgmt_network_result.stdout | trim }}"
+
+    - name: Note when the management network could not be discovered
+      ansible.builtin.debug:
+        msg: >-
+          No local interface holds {{ mgmt_address }}, so the `schoolnet` alias
+          will be omitted. Nothing references it, so this costs documentation
+          rather than isolation -- but check that {{ environment_file }} names
+          the address this node actually answers on.
+      when: not schoolnet_cidr
+
     - name: Require the node to exist in the Proxmox cluster filesystem
       ansible.builtin.stat:
         path: "/etc/pve/nodes/{{ node_name }}"
@@ -256,6 +314,9 @@
           [ALIASES]
 
           mgmt {{ mgmt_address }} # Proxmox management address
+          {% if schoolnet_cidr %}
+          schoolnet {{ schoolnet_cidr }} # School network, discovered from the management interface
+          {% endif %}
           provnet {{ prov_subnet }} # Factory-time provisioning network
           svcnet {{ svc_subnet }} # Site-time service network
           cache {{ cyberlab_cache_svc_ip }} # Package cache on svc0

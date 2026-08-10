@@ -388,11 +388,25 @@ comments and blank lines:
 | `950.fw` / `955.fw` | **Rules identical** — 9 directives each |
 | `cluster.fw` | One difference, in `[ALIASES]` only |
 
-The `cluster.fw` difference is that the generated file drops
-`schoolnet 10.64.62.0/23` and adds `svcnet 10.31.0.0/24`. **Neither alias is
-referenced by any rule** — `grep` across every `.fw` on the host finds only
-`dc/cache` and `dc/provnet` in use, and `mgmt` is unreferenced too. So the
-generated configuration is behaviourally identical to what is running.
+The `cluster.fw` difference is a single **added** alias,
+`svcnet 10.31.0.0/24`. **No rule references it** — `grep` across every `.fw` on
+the host finds only `dc/cache` and `dc/provnet` in use, and `mgmt` and
+`schoolnet` are unreferenced too. The generated configuration is a strict
+superset of what is running, and behaviourally identical to it.
+
+`schoolnet` was initially dropped, which would have been a quiet
+documentation regression: the alias records that the school network is a
+`/23`, and reading it as a `/24` puts half the district outside any rule
+written against it. It is now **rediscovered at run time** rather than
+hardcoded — from the interface that actually holds the management address,
+not from the default route, because on a multi-homed node those differ and an
+alias naming the wrong one is worse than none. On `pve1` this returns
+`10.64.62.0/23` on `vmbr0`, matching the hand-written value exactly.
+
+The lookup legitimately finds nothing when the controller reaches the API
+through a NAT or a floating address, in which case the alias is omitted
+rather than written empty — a bare `schoolnet` line is a parse error, and an
+unparseable `cluster.fw` is not a partially applied one.
 
 Two things this diff settles that were open:
 
@@ -404,9 +418,12 @@ Two things this diff settles that were open:
   the MAC-preserving `qm set` is skipped entirely — the swap cannot disturb a
   DHCP lease or an IPAM binding.
 
-`schoolnet` is the one piece of information the swap would lose. It is
-documentation rather than policy, and re-deriving it needs the host's own
-management prefix at runtime, so it is deliberately not carried today.
+The swap now loses nothing. Every address in both playbooks and the probe
+comes from the data model or from runtime discovery, which
+`tests/test_firewall_policy.py` enforces: any literal in 10/8 that is neither
+an infrastructure subnet declared in `inventory.yml` nor derived lab space
+fails the suite. That matters for Phase 7, which ships this to districts whose
+management network is not `10.64.62.0/23`.
 
 ---
 

@@ -189,6 +189,64 @@ def test_host_fw_is_written_before_cluster_fw():
     )
 
 
+def test_schoolnet_alias_is_guarded_by_a_conditional():
+    """An alias with no value is a parse error that takes the firewall down.
+
+    The school network is discovered from whichever interface holds the
+    management address, and that lookup legitimately returns nothing when the
+    controller reaches the API through a NAT or a floating address.
+    """
+    cluster_fw = _written_content(BOOTSTRAP, "cluster.fw")
+    lines = cluster_fw.splitlines()
+    schoolnet = next((i for i, line in enumerate(lines) if line.strip().startswith("schoolnet ")), None)
+    assert schoolnet is not None, "cluster.fw no longer writes a schoolnet alias"
+
+    preceding = "\n".join(lines[:schoolnet])
+    assert re.search(r"{%-?\s*if\s+schoolnet_cidr\s*-?%}\s*$", preceding), (
+        "the schoolnet alias is not guarded by `{% if schoolnet_cidr %}`, so a "
+        "host where the management address is not held locally would get a "
+        "bare `schoolnet` line — a parse error, and an unparseable cluster.fw "
+        "is not a partially applied one."
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [BOOTSTRAP, ASSERT_ISOLATION, PROBE_SCRIPT],
+    ids=lambda p: p.name,
+)
+def test_no_site_specific_addresses_are_hardcoded(path):
+    """Phase 7 ships this to districts that are not this one.
+
+    Infrastructure addresses (`prov0`, `svc0`) are fixed product design and may
+    appear as defaults. Everything else in 10/8 is site-specific: the
+    management network was hand-written as 10.64.62.0/23 on pve1 and is now
+    rediscovered from whichever interface actually holds the management
+    address. Lab space is derived per teacher and should never be literal.
+    """
+    inventory = load_yaml(REPO_ROOT / "ansible" / "inventory.yml")
+    infra_octets = {
+        int(str(subnet["subnet"]).split(".")[1])
+        for subnet in inventory["all"]["vars"]["proxmox_sdn"]["subnets"]
+    }
+    policy = load_yaml(REPO_ROOT / "data" / "policy.yml")["network_policy"]
+    lab_octets = set(range(int(policy["teacher_id_min"]), int(policy["teacher_id_max"]) + 1))
+
+    offenders = sorted(
+        {
+            literal
+            for literal in re.findall(r"\b10\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b", path.read_text())
+            if int(literal) not in infra_octets and int(literal) not in lab_octets
+        }
+    )
+    assert not offenders, (
+        f"{path.name} hardcodes addresses in 10.{{{', '.join(offenders)}}}.x.x, "
+        f"which is neither infrastructure ({sorted(infra_octets)}) nor derived "
+        f"lab space. Site-specific addresses belong in "
+        f"data/environments/<env>.yml or in runtime discovery."
+    )
+
+
 def test_guest_policy_joins_the_lab_guest_group():
     guest_fw = _written_content(BOOTSTRAP, "{{ item.0 }}.fw")
     assert "GROUP lab-guest" in guest_fw
