@@ -4,7 +4,10 @@ Planning document for taking this repository from its current state to a
 self-contained, classroom-deployable cyber range appliance.
 
 **Written:** 2026-08-04
-**Last revised:** 2026-08-06 — repair posture recorded
+**Last revised:** 2026-08-07 — `snat: false` isolation failure confirmed on
+hardware, recursive DNS found to be a live egress path
+(`docs/network-isolation.md`)
+**Previously revised:** 2026-08-06 — repair posture recorded
 (`docs/repair-posture.md`), cluster build sequence added to Phase 3
 **Previously revised:** 2026-08-05 — student-network question resolved, package
 cache promoted to Phase 2.5, network isolation designed
@@ -80,10 +83,28 @@ proprietary fork.
 
 ## Constraints
 
+**The development host is not the target hardware, and until 2026-08-07 this
+document did not say what it actually is.** `pve1` is a **Dell PowerEdge R730 —
+dual Xeon E5-2697 v4, 72 threads, 264 GB RAM.** That is a 2U rack server, and
+it is *larger* than the recommended target cluster: one box carries more RAM
+than 4 × 64 GB nodes. Consequences worth holding on to:
+
+- **The Phase 3 "measure real per-VM and per-LXC RAM" item is not actually
+  hardware-gated.** A realistic 30-student load fits on this box today, so
+  every estimated sizing number below — including the 22.5 GB/student figure
+  flagged as unreachable — can be replaced with measurement without buying
+  anything.
+- **Noise, power and thermals still need the mini-PC fleet.** An R730 tells you
+  nothing about a classroom cart, so those exit criteria stay genuinely
+  blocked on procurement.
+- **Density measurements taken here will flatter the design.** 72 threads and
+  DDR4 registered memory is not what an i5-8500T with 64 GB does under a boot
+  storm. Per-VM RAM transfers; per-node concurrency does not.
+
 | Constraint | Value | Consequence |
 |---|---|---|
 | Deployment | Classroom appliance, rolling rack | Noise, power, and thermal are product requirements |
-| Topology | 3-5 refurb mini/SFF PCs | ~32-64 GB RAM per node; density matters; no shared storage |
+| Topology | 3-5 refurb mini/SFF PCs (**target**; the dev host is an R730, see above) | ~32-64 GB RAM per node; density matters; no shared storage |
 | Connectivity | **Assume none; use it if present** | Must deploy and run fully offline. Where egress exists it is used for host updates and an apt cache — see the student-network section. Templates are never built on the appliance either way |
 | Peak concurrency | 16-30 students | Drives the RAM budget and therefore the BOM |
 | VM allocation | On-demand pods | Created at lab start, destroyed at lab end |
@@ -147,6 +168,15 @@ a validation that fails. Worth a CI check in Phase 1.
   improvement, but fixing them edits the only currently-tested path to a
   working host, so each should be retired with a hardware run behind it. See
   `.ansible-lint`.
+- **`controller-bootstrap-sdn.yml` runs a whole-host `ifreload -a`.** On a
+  single-node box reached over the very bridge it reloads, every SDN change is
+  a potential self-lockout, and `install-cyberlab.sh` runs this playbook with
+  no flags. It has not bitten us — a suspected outage on 2026-08-07 turned out
+  to be the admin laptop dropping onto a hotspot, and the host's uptime proved
+  it never blinked — but the exposure is real and belongs to whoever runs the
+  installer remotely, which is the district sysadmin the recipe is written for.
+  Worth scoping the reload to the VNet interfaces, or guarding it with a
+  revert-on-timeout the way a firewall change should be guarded.
 
 ### Resolved: `proxmox-sdn.yml` deleted
 
@@ -1004,13 +1034,14 @@ established idiom here rather than a new one.
   by design**, leaving 101-255 — about 150 teachers — clear of the low octets
   reserved for infrastructure.
 
-  **What is worth adding is a range assert on `teacher_id`**, which does not
-  exist today. `generate_runtime_artifacts.py` checks that it is an integer
-  and that it is unique, but not that it falls in 101-255. The floor is load-
-  bearing for the infrastructure subnets and the ceiling is load-bearing for
-  the network formula itself — `teacher_id: 256` produces an invalid octet,
-  the same failure mode already documented for `course_index` in Identifiers.
-  Both ends currently rest on convention.
+  **The range assert on `teacher_id` now exists** — added in `3a3c7d8`,
+  after this item was written. `generate_runtime_artifacts.py` enforces
+  101-255 with both bounds explained: the floor because the low octets are
+  reserved for infrastructure subnets such as `svc0`, the ceiling because
+  `teacher_id: 256` is not a valid octet in
+  `10.<teacher_id>.<section_code>.0/24`. Neither end rests on convention any
+  more. **Done — `svc0` at `10.31.0.0/24` is safe on enforcement rather than
+  on custom.**
 - **A `controller-bootstrap-package-cache.yml` playbook**, and its call in
   `install-cyberlab.sh` behind a flag defaulting the same way
   `cyberlab_sdn_build_sections` does — off until it is proven.
@@ -1036,6 +1067,60 @@ established idiom here rather than a new one.
   an offline appliance that slowly empties a cache nothing can refill, and it
   fails months after deployment, in someone else's classroom, looking like
   corruption rather than configuration.
+
+#### Built and measured — `pve1`, 2026-08-07
+
+Built by `ansible/playbooks/controller-bootstrap-package-cache.yml` as CT `801`
+on `svc0` (`10.31.0.10`), dual-homed to `prov0` for seeding, retention pinned,
+`apt-cacher-ng` answering on `:3142`. Two design defects surfaced that this
+document did not anticipate, and both would have shipped.
+
+**1. The shipped configuration could not reply to any pod.** The cache lives on
+`svc0` and every pod lives on a different subnet, so every reply is off-subnet
+and needs a route. The only route off `svc0` was the default via `prov0` — the
+interface deliberately stripped before a unit ships. Measured: strip `net1` and
+the guest cannot reach `10.31.0.10:3142` at all, connection timed out. **The
+service worked on the bench and died in the classroom**, which is the worst
+available place for a defect to first appear.
+
+Fixed by installing persistent return routes to every classroom subnet via the
+`svc0` gateway, as a systemd unit inside the container — not an
+`/etc/network/interfaces` snippet, because `pct` rewrites that file whenever a
+NIC is reconciled, which is exactly the event that must not remove the routes.
+The playbook now asserts a route exists per declared section rather than
+trusting that it was set. Note the coupling this creates: **adding a section
+requires re-running the cache playbook, not just the SDN one.**
+
+**2. Debian 13's default sources defeat the cache entirely.** The cloud image
+ships `URIs: mirror+file:///etc/apt/mirrors/debian.list`, which resolves to
+`https://deb.debian.org`. `apt-cacher-ng` answers HTTPS with
+`403 CONNECT denied`, and even if tunnels were allowed a CONNECT tunnel is
+opaque — nothing inside it can be cached. Measured: with the proxy configured
+and https sources, `apt-get update` fails outright and the cache stays at zero
+files.
+
+**So "bake in an explicit proxy line" is necessary but not sufficient.** The
+template image must *also* have its sources rewritten to plain `http://` with
+the `mirror+file` indirection replaced by a concrete host. With that done the
+same test cached 28 objects and 24 MB on first use.
+
+Dropping to `http` sounds like a downgrade and is not one: Debian packages are
+GPG-signed and `apt` verifies signatures regardless of transport, which is why
+Debian has always supported plain-http mirrors. The only loss is
+confidentiality of *which* packages are fetched, on an isolated lab network,
+to a cache that must see the requests to do its job at all.
+
+Worth keeping the `403` rather than configuring around it. A misconfigured
+image fails loudly at build time instead of silently bypassing the cache and
+appearing to work right up until the uplink goes away.
+
+**Exit criteria status:** the first three below are met. The fourth — the
+physical cable pull — is not, and was approximated by stripping the cache's
+own egress interface, which is strictly weaker. Both controls behaved
+correctly: a cached package installed at local-disk speed with no upstream, and
+an *uncached* package failed with `503 Network is unreachable`, so the positive
+result cannot have come from a surviving upstream path. The real test still
+wants a hand on the cable.
 
 #### Exit
 
@@ -1241,11 +1326,11 @@ carved out in the isolation test. Settle this in Phase 5 rather than
 discovering it in Phase 6, or the test gets written and then quietly weakened
 to make consoles work.
 
-#### `snat: false` is not isolation — suspected, and the first thing to test
+#### `snat: false` is not isolation — CONFIRMED on hardware, 2026-08-07
 
 The roadmap has been reading `snat: false` on section VNets as "no egress at
 all" (`controller-bootstrap-sdn.yml:61` says so in a comment). **That is
-probably wrong, and the error is in the direction that matters.** SNAT
+wrong, and the error is in the direction that matters.** SNAT
 controls address translation, not reachability. What the current build
 produces is:
 
@@ -1282,16 +1367,32 @@ verified present; the consequence is not yet demonstrated:
   which is safe now and becomes the opposite of safe the moment it is turned
   on and guests inherit rules nobody re-read.
 
-What remains untested is only the last step: whether a lab guest can therefore
-reach the management address. Section VNets exist on no host, so there was
-nothing to test *from*. Build one section VNet, attach a guest, and from it try
-(a) `ping` the management IP, (b) reach a guest in another section, (c) reach
-`10.30.0.1`. Given a forwarding host with an address on every subnet and no
-filter, expect all three to succeed — which makes isolation a firewall project,
-not an SDN-flag project.
+**Fully confirmed on `pve1`, 2026-08-07.** The last step was run: all four
+section VNets were built with this repository's own playbook, two disposable
+Debian 13 guests were cloned onto two different sections, and the probes were
+run from inside one of them. **All three predictions held**, and one thing
+nobody predicted also held:
 
-See `docs/network-isolation.md` for the full measured baseline, including the
-correction that the school network is a `/23` rather than a `/24`.
+- **The Proxmox management address is reachable from a lab guest** — ICMP,
+  tcp/8006 (the Web UI) and tcp/22. This is the assertion Phase 5 exists to
+  make and it fails today.
+- **Cross-section isolation does not exist.** A guest in one section reaches
+  another section's gateway *and its guests*.
+- **`prov0` is reachable** from a section VNet.
+- **The district LAN and the internet are blocked — but by accident.** They are
+  protected by the absence of a return route, not by any policy: with
+  `snat: false` the packets arrive with a source address nothing can reply to.
+  One static route on a district device would undo it. Do not count it as
+  isolation.
+- **Recursive DNS works from lab guests, and is a live exfiltration path.**
+  Not predicted anywhere in this document. See `docs/network-isolation.md`.
+
+So isolation is a firewall project, not an SDN-flag project — as predicted, now
+on evidence rather than inference.
+
+See `docs/network-isolation.md` for the full measured baseline and the
+2026-08-07 result table, including the correction that the school network is a
+`/23` rather than a `/24`.
 
 #### Isolation enforcement — decided: Proxmox firewall, not a firewall VM
 
@@ -1371,9 +1472,17 @@ isolation test writes itself.
 
 1. No route to the internet, tested **by IP**, not by name — a DNS failure
    passes a naive test for the wrong reason.
+1a. **No resolution of an external name either**, asserted separately from the
+   by-IP test. Measured 2026-08-07: name resolution *succeeds* from a lab guest
+   while IP reachability fails, so the two tests disagree and each is
+   misleading on its own. Nothing in this list as originally written would have
+   caught a fully recursive resolver, with tcp/53 open, reachable from every
+   student VM.
 2. No reach to the district LAN, and specifically **not the Proxmox management
-   address**. This is the assertion the finding above says may fail today.
-3. No reach to another pod's or section's subnet.
+   address**. Measured 2026-08-07: **this fails today** — ICMP, tcp/8006 and
+   tcp/22 all reach the host from a lab guest.
+3. No reach to another pod's or section's subnet. Measured 2026-08-07: **this
+   fails today**, guest-to-guest across sections included.
 4. Reaches the cache on `3142` and **nothing else on that host** — the
    carve-out is a host *and port*, not a host. Testing only that the cache
    works would pass a container with SSH exposed to every student in the
@@ -1441,31 +1550,92 @@ supplement.
 
 ## Immediate next actions
 
-1. **Build and seed the `apt-cacher-ng` LXCs (Phase 2.5)** — the next major
-   item. Everything else here can be reordered; this cannot, because a cache
-   can only be filled while the lab still has egress, and the current build
-   still does
-2. **Test whether `snat: false` actually isolates** (Phase 5) — build one
-   section VNet, attach a guest, and try to reach the Proxmox management
-   address from it. Expect it to succeed: as of 2026-08-05 the datacenter
-   firewall is disabled, forwarding is on, and the host holds a gateway on
-   every VNet subnet. Cheap to run in the same lab session as item 1
-3. **Pick the firewall backend and enable the datacenter firewall** (Phase 5).
-   `pve1` runs PVE 9.2.9 with both `pve-firewall` and `proxmox-firewall`
-   installed and active but neither producing rules, so this is an open
-   choice rather than an inherited one. Clear the stale `.fw` files first —
-   they reference a decommissioned VM and subnets the design no longer has,
-   and guest `enable: 1` flags start applying the moment the datacenter
-   firewall comes on. See `docs/network-isolation.md`
-4. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
-   Worth doing *after* item 1, not before: the wipe-and-rebuild then doubles as
-   the proof that the cache is reproducible from the installer rather than a
-   hand-built artifact that happens to exist
-5. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
+**Items 1-3 were closed in a single lab session on 2026-08-07.** What follows
+is the state that session left behind, then what is next.
+
+1. ~~**Build and seed the `apt-cacher-ng` LXCs (Phase 2.5)**~~ **— done
+   2026-08-07.** CT `801` on a new `svc0` VNet, built by
+   `controller-bootstrap-package-cache.yml`, wired into `install-cyberlab.sh`
+   behind `--with-package-cache` (opt-in). Two defects that would have shipped
+   were found and fixed — the cache could not reply to any pod once its
+   factory NIC was stripped, and Debian 13's `https` sources defeat caching
+   entirely. Three of four exit criteria met; the cable pull is still owed
+2. ~~**Test whether `snat: false` actually isolates**~~ **— done 2026-08-07.**
+   It does not. A lab guest reaches the Proxmox Web UI and SSH, every other
+   section's guests, and `prov0`; the internet and district LAN are blocked
+   only by the absence of a return route; and recursive DNS is a live
+   exfiltration channel nobody had predicted. Full results in
+   `docs/network-isolation.md`. This makes item 3 the top isolation priority
+   rather than a parallel one
+3. ~~**Pick the firewall backend and enable the datacenter firewall**~~
+   **— done 2026-08-07.** Backend is **legacy `pve-firewall`**: Proxmox's own
+   documentation marks `proxmox-firewall` as tech preview and "not suited for
+   production use", and it also failed to apply rules on this host. Stale
+   `500.fw` and `9004.fw` removed. The datacenter firewall is enabled with
+   per-guest default-deny, and the isolation failures measured earlier the
+   same day are now all closed: management, cross-section, `prov0`, internet
+   and DNS are blocked, while same-section peers and the package cache on
+   tcp/3142 — and *only* 3142 — still work. Full result table, the applied
+   rule set, and five silent gotchas in `docs/network-isolation.md`
+### Next, in the order that makes sense now
+
+4. **Turn the isolation probe into a test that runs on every deploy.** This is
+   the largest gap the session left. Phase 5 requires isolation to be *proven
+   continuously*; what exists is a shell script someone ran once, by hand, on
+   one host. Its assertions are already written and validated
+   (`docs/network-isolation.md`), so this is packaging rather than design —
+   but until it is automated, the next person to change a VNet, rebuild a
+   guest, or add a section will silently unfilter something. **Three of the
+   five gotchas recorded that day were exactly this failure**: a guest that
+   looked configured and was not
+5. **Bake the cache client config into the template images.** The proxy line
+   *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
+   `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
+   needs hand-configuring and the cache warms only by accident. This is what
+   makes the Phase 2.5 seeding claim true for real images rather than for one
+   hand-edited test guest
+6. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
+   Now doubles as the proof that **both** the cache and the firewall are
+   reproducible from the installer rather than hand-built artifacts that happen
+   to exist. Note the installer does not yet write any firewall config — the
+   2026-08-07 rules were placed by hand, so this is a real gap between what the
+   host runs and what the recipe builds
+7. **Pull the cable.** The one Phase 2.5 exit criterion still owed. Stripping
+   the cache's own egress interface is strictly weaker, and the roadmap was
+   right to insist on the physical test
+8. **Measure per-VM and per-LXC RAM on the R730** (Phase 3). No longer
+   hardware-gated — see the note under Constraints. Right-size `slots.yml` from
+   the result and settle the pod-shape question the RAM budget section raises
+9. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM — **no longer blocked** on the student-network
    question, which resolved to Model A for the pilot. Fold in the cache's
-   per-node disk once item 1 has measured it, and the uplink node's second NIC
+   per-node disk (20 GB provisioned, 24 MB used after one template's worth of
+   packages, so the 10-20 GB estimate looks sound) and the uplink node's second
+   NIC
 
 The district-sysadmin conversation is no longer an immediate action. It
 belongs to the prebuilt SKU (Phase 7) and its question list is parked in the
 student-network section until there is a district to ask.
+
+### Host state left behind on `pve1`, 2026-08-07
+
+Recorded because the next session starts here, not from a clean host:
+
+- **Datacenter firewall is ENABLED** with per-guest default-deny.
+  `proxmox-firewall` is stopped, disabled and **masked**; unmask it before any
+  future nftables attempt.
+- **Firewall rules were placed by hand**, not by any playbook. They live in
+  `/etc/pve/firewall/cluster.fw`, `/etc/pve/nodes/pve1/host.fw`, and per-guest
+  `950.fw`/`955.fw`. Nothing in this repository writes them yet.
+- **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
+  `t101c213`) plus the new `svc0`. They were absent before this session.
+- **CT `801`** runs the package cache, still dual-homed with its `prov0`
+  seeding NIC attached.
+- **Disposable guests `950` and `955` are still running.** `955` was moved onto
+  `t101c011` for a same-section control test, so the cross-section rig needs it
+  moved back to `t101c112` to be reused. Destroy both with
+  `qm stop <id> && qm destroy <id> --purge` — and note that purge also deletes
+  their `.fw` files.
+- **Pre-change capture** at `/root/cyberlab-captures/pve1-20260807-081810`;
+  firewall backup at `/root/fw-backup-20260807-124731`. Run logs from the
+  session are the `/root/*.log` files.

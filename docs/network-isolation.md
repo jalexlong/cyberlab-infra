@@ -3,8 +3,12 @@
 How the appliance stays silent on a school network.
 
 **Written:** 2026-08-05
-**Status:** design. Nothing here is implemented; the *baseline* below was
-measured on `pve1` 2026-08-05, the design was not.
+**Last revised:** 2026-08-07 — isolation failure measured end to end
+**Status:** design, with a measured failure to design against. Nothing here is
+implemented. The *baseline* was measured on `pve1` 2026-08-05; the
+*consequence* — that lab guests reach the management address, each other
+across sections, and a recursive resolver — was measured 2026-08-07. The rule
+set itself remains unimplemented and untested.
 **Related:** `docs/roadmap.md` Phase 5 (isolation), Phase 2.5 (package cache),
 Phase 7 (site survey).
 
@@ -73,6 +77,218 @@ proto-prototype:
   path appends rather than reconciles**, so rules accumulate across runs. Worth
   a check in the rebuild — an idempotent playbook that leaves a growing
   ruleset behind is not idempotent where it counts.
+
+---
+
+## Measured: isolation is broken, and DNS is the surprise — `pve1`, 2026-08-07
+
+The 2026-08-05 baseline recorded the *preconditions* and left the consequence
+untested, because section VNets existed on no host and there was nothing to
+test from. That gap is now closed. All four section VNets were built with
+`controller-bootstrap-sdn.yml -e cyberlab_sdn_build_sections=true`, two
+disposable Debian 13 guests were cloned onto two different sections, and the
+probes were run from inside one of them.
+
+Test rig: guest `950` on `t101c011` (`10.101.11.100`), guest `955` on
+`t101c112` (`10.101.112.100`), both by DHCP, both NICs with `firewall=0`,
+datacenter firewall still `enable: 0`.
+
+| From a lab guest, target | Result | Should be |
+|---|---|---|
+| Own section gateway `10.101.11.1` | **reachable** | reachable (control) |
+| **Proxmox management `10.64.62.200` ICMP** | **REACHABLE** | blocked |
+| **Proxmox Web UI `10.64.62.200:8006`** | **REACHABLE** | blocked |
+| **Proxmox SSH `10.64.62.200:22`** | **REACHABLE** | blocked |
+| Other section gateway `10.101.112.1` | **REACHABLE** | blocked |
+| **Other section's guest `10.101.112.100`** | **REACHABLE** | blocked |
+| Third section gateway `10.101.123.1` | **REACHABLE** | blocked |
+| `prov0` gateway `10.30.0.1` | **REACHABLE** | blocked |
+| District gateway `10.64.62.1` | blocked | blocked |
+| Controller CT `800` at `10.64.62.74`, ICMP and tcp/22 | blocked | blocked |
+| Internet `1.1.1.1` / `8.8.8.8`, ICMP and tcp/443 | blocked | blocked |
+| **Recursive DNS for any name** | **REACHABLE** | blocked |
+
+**The Phase 5 prediction was right, and the ranking of severity was right.**
+Roadmap Phase 5 said to expect all three of management, cross-section and
+`prov0` to succeed. All three do. Isolation is a firewall project, exactly as
+predicted, not an SDN-flag project.
+
+### Why the district LAN is blocked but the management address is not
+
+These look inconsistent and are not. `10.64.62.200` is an address *on the host
+itself*, so a guest packet is delivered locally and the host answers from an
+interface that already has a route back to `10.101.11.0/24`. Traffic to
+`10.64.62.1` or `10.64.62.74` must instead be *forwarded* out `vmbr0`, and
+with `snat: false` it arrives carrying a `10.101.11.100` source address that
+those devices have no route back to.
+
+**So the district LAN and internet are protected by the absence of a return
+route, not by a policy.** That is an accident of addressing, and it is one
+static route on a district device — or one SNAT rule added later for a good
+reason — away from evaporating. It should not be counted as isolation. The
+management address, meanwhile, needs no forwarding at all, which is exactly why
+it is the one that fails.
+
+### The finding that was not predicted: DNS is a live egress channel
+
+`getent hosts deb.debian.org` succeeds from a lab guest. This is not a cached
+or hosts-file answer: a randomly generated name under `example.com` returns
+`NXDOMAIN`, which means the query genuinely reached upstream recursion and came
+back with an authoritative answer. **tcp/53 to the VNet gateway is also open**,
+which is the high-bandwidth variant. A direct UDP query to `8.8.8.8` times out,
+so guests cannot bypass the gateway — but they do not need to, because the
+zone's `dnsmasq` resolves on their behalf and the host has egress.
+
+This matters more than it first sounds:
+
+- **It is a data exfiltration path.** DNS tunnelling over a fully recursive
+  resolver, with TCP available, is a standard technique — and this is a lab
+  whose entire purpose is teaching students to find exactly this kind of thing.
+  "No egress from lab networks" is currently false, and false through the one
+  protocol nobody thinks of as egress.
+- **It inverts the naive-test warning already in the roadmap.** Phase 5 warns
+  that testing the internet *by name* can fail for the wrong reason and pass a
+  naive test. The live host shows the mirror image: name resolution **succeeds**
+  while IP reachability **fails**. A by-name test would report the internet
+  reachable; a by-IP test reports it blocked. Both are misleading alone, so the
+  isolation test has to assert both, separately and by name.
+- **Phase 2.5 already wants this closed.** The package-cache design specifies an
+  *explicit* proxy precisely so lab guests need no DNS at all. That decision is
+  now load-bearing for isolation, not merely tidy: with an explicit proxy the
+  gateway resolver can be refused outright rather than left as the one hole in a
+  default-deny.
+
+### Consequences for the rule set
+
+The rule shape below stays as designed, with two corrections:
+
+1. **`OUT → VNet gateway, udp/67-68 and 53` is too generous.** Port 53 there is
+   the tunnelling channel. Once the package cache is explicit, drop `53` and
+   keep only DHCP. If any lab genuinely needs name resolution, it should get a
+   local zone served with no upstream recursion, not a forwarder.
+2. **Assert the negative for DNS, by name.** Add "cannot resolve an external
+   name" to the isolation test's required assertions. Nothing in the current
+   list would have caught this.
+
+---
+
+## Enforced and verified — `pve1`, 2026-08-07
+
+The datacenter firewall is **on**, and the isolation the design asked for is now
+real rather than intended. Same rig as above, `firewall=1` on both lab guests.
+
+| From a lab guest, target | Before | After |
+|---|---|---|
+| Same-section peer *(control)* | reachable | **reachable** |
+| Proxmox management ICMP / 8006 / 22 | REACHABLE | **blocked** |
+| Other section's gateway and guest | REACHABLE | **blocked** |
+| `prov0` gateway | REACHABLE | **blocked** |
+| Internet by IP, ICMP and tcp/443 | blocked | **blocked** |
+| External name resolution | REACHABLE | **blocked** |
+| Package cache tcp/3142 | reachable | **reachable** |
+| Package cache tcp/22 and ICMP | reachable | **blocked** |
+| `apt-get update` + install via cache | — | **works** (16.4 MB, then 7.7 MB at 57 MB/s) |
+
+**The carve-out is a host *and* a port, and that is now demonstrated rather
+than asserted**: `3142` answers, `22` and ICMP on the same container do not.
+Testing only that the cache works would have passed a container with SSH
+exposed to every student in the building.
+
+### Backend: legacy `pve-firewall`, not `proxmox-firewall`
+
+**Decided against nftables for now, on the vendor's own words.** The Proxmox
+documentation marks `proxmox-firewall` as *tech preview* and states plainly
+that it "is currently not suited for production use." For a unit shipped to a
+district that settles it, regardless of nftables being the better long-term
+technology.
+
+It also failed here in practice. With `nftables: 1` set while guests already
+carried `firewall=1`, `proxmox-firewall` logged
+`error updating firewall rules: cannot execute nftables commands` every five
+seconds and never populated its guest maps — while its `bridge` table still
+default-dropped guest traffic. **A firewall broken closed**, which reads
+exactly like working isolation until you notice the control has failed too.
+The documented sequence is: clear the NIC flag, switch the backend, restart
+every running guest, then re-enable the flag.
+
+Switching back is one line, so this is a revisit-later decision, not a fork.
+Both backends consume identical `/etc/pve/*.fw` configuration, so the rule set
+below is what migrates when the preview graduates.
+
+### Five things that will bite anyone reproducing this
+
+Each of these produced a wrong measurement before it was understood, and every
+one of them is silent.
+
+1. **`qm set --net0 …` without an explicit MAC regenerates the MAC.** That
+   invalidates the DHCP lease, the SDN IPAM binding, *and* the MAC-source
+   filter the firewall itself installs — so the guest loses its address and
+   every probe returns "blocked" for reasons unrelated to policy. **The pod
+   engine must set `firewall=1` at guest creation**, or preserve the MAC
+   explicitly on every update.
+2. **`qm destroy --purge` deletes `/etc/pve/firewall/<vmid>.fw`.** Rebuilding a
+   guest therefore drops its firewall policy while leaving `firewall=1` in the
+   NIC config — it comes back **unfiltered and looking configured**. This is
+   the same failure class as the playbook targeting an absent host: the state
+   that proves enforcement is separate from the state that requests it.
+3. **`host.fw` rejects `policy_in` and `policy_out`** as unparseable. They are
+   datacenter- and guest-level options only. Host policy comes from the
+   defaults plus explicit rules.
+4. **DHCP needs a host *outbound* rule.** The zone's `dnsmasq` runs on the
+   host, so every OFFER is host-outbound. Without an explicit
+   `OUT ACCEPT -p udp -dport 67:68`, `dnsmasq` logs
+   `Error sending DHCP packet: Operation not permitted` and guests sit with no
+   address forever. The inbound half must also sit **above** the lab-subnet
+   DROP, because a renewing client sources from its leased `10.101.x.x`
+   address — otherwise leases work at boot and fail at renewal, minutes into a
+   class.
+5. **The section gateway is the host**, so "ping your own gateway" is not a
+   valid intra-section control — it is deliberately blocked by the lab→host
+   DROP. Intra-section connectivity must be tested **guest to guest**. Using
+   the gateway as the control reports a broken firewall when the firewall is
+   correct.
+
+### The rule set as applied
+
+`cluster.fw` carries `enable: 1`, `policy_in: DROP`, `policy_out: DROP`, and
+one security group:
+
+```
+[group lab-guest]
+OUT ACCEPT -dest dc/cache -p tcp -dport 3142   # carve-out: host AND port
+OUT ACCEPT -p udp -dport 67:68                 # DHCP only
+# port 53 deliberately absent -- see the DNS finding above
+```
+
+Each guest adds only its own section:
+
+```
+GROUP lab-guest
+OUT ACCEPT -dest 10.101.11.0/24
+IN  ACCEPT -source 10.101.11.0/24
+```
+
+`host.fw` allows DHCP in and out ahead of a `10.101.0.0/16 → host` DROP, then
+SSH, `8006` and ICMP for management. **The lab-subnet DROP covers `teacher_id`
+101 only** — lab space is `10.<101-255>.x.0/24`, so this needs generalising
+before a second teacher exists.
+
+### Still not covered
+
+- **Guacamole's carve-out**, which does not exist yet. It points the opposite
+  way to the cache — Guacamole initiates *into* pod VNets — and that asymmetry
+  is what makes both testable.
+- **The isolation test is a shell script, not something that runs on deploy.**
+  Phase 5 requires a test that runs every time. What exists today is a
+  measurement someone performed once.
+- **`policy_out: DROP` was never verified for the host itself**, only for
+  guests.
+
+### Rig teardown
+
+Guests `950` and `955` are disposable and destroyed with
+`qm stop <id> && qm destroy <id> --purge`. The section VNets they used were
+created by the standard playbook and can be removed subnets → VNets → zone.
 
 ---
 
