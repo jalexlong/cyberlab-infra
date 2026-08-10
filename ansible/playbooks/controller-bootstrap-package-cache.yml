@@ -1,0 +1,409 @@
+---
+# Build the apt-cacher-ng package cache LXC (roadmap Phase 2.5).
+#
+# What this is for: an air-gapped classroom must still be able to install
+# software into lab guests. The cache is what makes "no dependence on district
+# network services" literally true rather than aspirational. It can only be
+# seeded while the lab still has egress, which is why Phase 2.5 sits before the
+# air gap and not after it.
+#
+# Placement: one container per node, not one shared service for the cluster.
+# Pod affinity puts pod networks in node-local zones, so a cache on node 1 has
+# no path to a pod VNet on node 2. VMIDs are cluster-unique, so a per-node
+# service needs one ID per node -- data/bootstrap-policy.yml reserves 801-805.
+#
+# The container is dual-homed, and that is how the air gap gets crossed exactly
+# once:
+#
+#   net0  svc0   permanent, no egress, the address lab guests talk to
+#   net1  prov0  factory-time only, carries the upstream fetch, stripped before
+#                a unit ships
+#
+# This mirrors the pattern the template pipeline already uses, where
+# controller-promote-template.yml strips every netN before `qm template`.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbooks/controller-bootstrap-package-cache.yml
+#   ...  -e cyberlab_cache_seed_nic=false      # build without the prov0 foot
+#   ...  -e cyberlab_cache_ctid=802            # second node
+#
+# Off by default in install-cyberlab.sh, the same way
+# cyberlab_sdn_build_sections is, until it is proven.
+
+- name: Bootstrap the Cyberlab package cache
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars:
+    # One per node. 801-805 are reserved in data/bootstrap-policy.yml.
+    cyberlab_cache_ctid: 801
+    cyberlab_cache_hostname: cyberlab-cache1
+
+    # 512 MB is ample for apt-cacher-ng; the disk is the real cost. 20 GB is
+    # the upper end of the roadmap's 10-20 GB estimate, chosen because
+    # measuring an under-provisioned cache tells you nothing useful.
+    cyberlab_cache_memory_mb: 512
+    cyberlab_cache_cores: 1
+    cyberlab_cache_disk_gb: 20
+
+    cyberlab_cache_storage: local-lvm
+    cyberlab_cache_ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
+
+    # net0, permanent. Static rather than DHCP: lab guests carry this address
+    # baked into an apt proxy line, so it must not move.
+    cyberlab_cache_svc_vnet: svc0
+    cyberlab_cache_svc_ip: 10.31.0.10
+    cyberlab_cache_svc_cidr: 24
+
+    # net1, factory-time only. Holds the default route, because svc0
+    # deliberately has none.
+    cyberlab_cache_seed_nic: true
+    cyberlab_cache_prov_vnet: prov0
+    cyberlab_cache_prov_ip: 10.30.0.20
+    cyberlab_cache_prov_cidr: 24
+    cyberlab_cache_prov_gw: 10.30.0.1
+
+    cyberlab_cache_port: 3142
+
+    # Return routes to the classroom subnets, via the svc0 gateway on the host.
+    #
+    # These are not optional and they are not a tuning detail. The cache lives
+    # on svc0 and every pod lives on a different subnet, so every reply the
+    # cache sends is off-subnet and needs a route. Until 2026-08-07 the only
+    # route off svc0 was the default via prov0 -- the interface that is
+    # deliberately stripped before a unit ships. Measured consequence: strip
+    # net1 and the cache stops answering *every* pod, so the service works on
+    # the bench and fails in the classroom, which is the worst possible place
+    # for this failure to appear first.
+    #
+    # Derived from the environment file rather than hardcoded, so adding a
+    # section and re-running this playbook keeps the routes honest. Note the
+    # coupling that creates: a new section needs this playbook re-run, not just
+    # the SDN one.
+    cyberlab_env: school-lab
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    cache_return_routes: >-
+      {{
+        environment_data.environment.sections
+        | default({})
+        | dict2items
+        | map(attribute='value.subnet')
+        | list
+      }}
+
+  tasks:
+    - name: Require the cache VMID to sit in the reserved infrastructure range
+      ansible.builtin.assert:
+        that:
+          - cyberlab_cache_ctid | int >= 801
+          - cyberlab_cache_ctid | int <= 805
+        fail_msg: >-
+          cyberlab_cache_ctid is {{ cyberlab_cache_ctid }}, outside the 801-805
+          range data/bootstrap-policy.yml reserves for the per-node package
+          cache. One ID per node; VMIDs are cluster-unique.
+
+    - name: Require the svc0 VNet interface to exist on the host
+      ansible.builtin.command:
+        argv:
+          - ip
+          - -br
+          - link
+          - show
+          - "{{ cyberlab_cache_svc_vnet }}"
+      register: svc_vnet_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail clearly when the service VNet is absent
+      ansible.builtin.assert:
+        that:
+          - svc_vnet_check.rc == 0
+        fail_msg: >-
+          The service VNet '{{ cyberlab_cache_svc_vnet }}' does not exist on
+          this host. It is declared in ansible/inventory.yml under
+          proxmox_sdn.vnets and built by controller-bootstrap-sdn.yml, which
+          always builds infrastructure networks. Run that playbook first.
+
+    - name: Check whether the cache container already exists
+      ansible.builtin.command:
+        argv:
+          - pct
+          - status
+          - "{{ cyberlab_cache_ctid | string }}"
+      register: cache_ct_status
+      changed_when: false
+      failed_when: false
+
+    - name: Create the cache container
+      ansible.builtin.command:
+        argv:
+          - pct
+          - create
+          - "{{ cyberlab_cache_ctid | string }}"
+          - "{{ cyberlab_cache_ostemplate }}"
+          - --hostname
+          - "{{ cyberlab_cache_hostname }}"
+          - --cores
+          - "{{ cyberlab_cache_cores | string }}"
+          - --memory
+          - "{{ cyberlab_cache_memory_mb | string }}"
+          - --rootfs
+          - "{{ cyberlab_cache_storage }}:{{ cyberlab_cache_disk_gb }}"
+          - --unprivileged
+          - "1"
+          - --onboot
+          - "1"
+          - --net0
+          - >-
+            name=eth0,bridge={{ cyberlab_cache_svc_vnet }},ip={{
+            cyberlab_cache_svc_ip }}/{{ cyberlab_cache_svc_cidr }},type=veth
+          - --description
+          - "Cyberlab package cache (apt-cacher-ng). See roadmap Phase 2.5."
+      register: cache_ct_create
+      changed_when: cache_ct_create.rc == 0
+      when: cache_ct_status.rc != 0
+
+    # Reconciled every run rather than only at creation, so a cache built
+    # before the seeding decision was made still gets a working upstream path.
+    # This is the interface that must be removed before a unit ships.
+    - name: Attach the factory-time seeding interface on prov0
+      ansible.builtin.command:
+        argv:
+          - pct
+          - set
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --net1
+          - >-
+            name=eth1,bridge={{ cyberlab_cache_prov_vnet }},ip={{
+            cyberlab_cache_prov_ip }}/{{ cyberlab_cache_prov_cidr }},gw={{
+            cyberlab_cache_prov_gw }},type=veth
+      register: cache_seed_nic
+      changed_when: cache_seed_nic.rc == 0
+      when: cyberlab_cache_seed_nic | bool
+
+    - name: Remove the seeding interface when seeding is disabled
+      ansible.builtin.command:
+        argv:
+          - pct
+          - set
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --delete
+          - net1
+      register: cache_seed_nic_remove
+      changed_when: cache_seed_nic_remove.rc == 0
+      failed_when: false
+      when: not (cyberlab_cache_seed_nic | bool)
+
+    - name: Start the cache container
+      ansible.builtin.command:
+        argv:
+          - pct
+          - start
+          - "{{ cyberlab_cache_ctid | string }}"
+      register: cache_ct_start
+      changed_when: cache_ct_start.rc == 0
+      failed_when:
+        - cache_ct_start.rc != 0
+        - "'already running' not in (cache_ct_start.stderr | default(''))"
+
+    - name: Wait for the container to be running
+      ansible.builtin.command:
+        argv:
+          - pct
+          - status
+          - "{{ cyberlab_cache_ctid | string }}"
+      register: cache_ct_running
+      changed_when: false
+      retries: 15
+      delay: 2
+      until: "'status: running' in cache_ct_running.stdout"
+
+    - name: Install apt-cacher-ng inside the container
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /bin/bash
+          - -c
+          - >-
+            set -e;
+            if dpkg -s apt-cacher-ng >/dev/null 2>&1; then
+              echo ALREADY_INSTALLED;
+            else
+              export DEBIAN_FRONTEND=noninteractive;
+              apt-get update -qq;
+              apt-get install -y -qq apt-cacher-ng;
+              echo INSTALLED;
+            fi
+      register: acng_install
+      changed_when: "'INSTALLED' in acng_install.stdout and 'ALREADY_INSTALLED' not in acng_install.stdout"
+
+    # Retention is pinned deliberately. apt-cacher-ng expires unreferenced
+    # files by default, which on an offline appliance slowly empties a cache
+    # nothing can refill. The failure lands months after deployment, in someone
+    # else's classroom, and looks like corruption rather than configuration.
+    #
+    # Both halves are needed: ExThreshold alone still leaves the daily cron
+    # calling the expiration handler.
+    - name: Pin cache retention and bind only to the addresses it holds
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /bin/bash
+          - -c
+          - >-
+            set -e;
+            conf=/etc/apt-cacher-ng/zzz-cyberlab.conf;
+            printf '%s\n'
+            '# Managed by controller-bootstrap-package-cache.yml. Do not edit.'
+            '# Retention pinned: an offline appliance cannot refill an expired cache.'
+            'ExThreshold: 36500'
+            'ExAbortOnProblems: 0'
+            'CacheDir: /var/cache/apt-cacher-ng'
+            'Port: {{ cyberlab_cache_port }}'
+            'BindAddress: {{ cyberlab_cache_svc_ip }}{{ " " ~ cyberlab_cache_prov_ip if (cyberlab_cache_seed_nic | bool) else "" }} 127.0.0.1'
+            > "$conf";
+            chmod 0644 "$conf";
+            if [ -f /etc/cron.daily/apt-cacher-ng ]; then
+              chmod -x /etc/cron.daily/apt-cacher-ng;
+            fi;
+            systemctl enable apt-cacher-ng >/dev/null 2>&1 || true;
+            systemctl restart apt-cacher-ng;
+            echo CONFIGURED
+      register: acng_config
+      changed_when: "'CONFIGURED' in acng_config.stdout"
+
+    # Installed as a systemd unit rather than an /etc/network/interfaces
+    # snippet because pct rewrites that file whenever a NIC is reconciled, and
+    # a route that disappears when net1 is stripped is precisely the bug this
+    # exists to fix.
+    - name: Install persistent return routes to the classroom subnets
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /bin/bash
+          - -c
+          - >-
+            set -e;
+            printf '%s\n'
+            '[Unit]'
+            'Description=Cyberlab cache return routes to classroom subnets'
+            'After=network-online.target'
+            'Wants=network-online.target'
+            ''
+            '[Service]'
+            'Type=oneshot'
+            'RemainAfterExit=yes'
+            {% for r in cache_return_routes %}
+            'ExecStart=/sbin/ip route replace {{ r }} via {{ cyberlab_cache_svc_ip | regex_replace("\.[0-9]+$", ".1") }} dev eth0'
+            {% endfor %}
+            'ExecStop=/bin/true'
+            ''
+            '[Install]'
+            'WantedBy=multi-user.target'
+            > /etc/systemd/system/cyberlab-cache-routes.service;
+            systemctl daemon-reload;
+            systemctl enable --now cyberlab-cache-routes.service;
+            echo ROUTES_APPLIED
+      register: cache_routes
+      changed_when: "'ROUTES_APPLIED' in cache_routes.stdout"
+
+    - name: Show the cache routing table
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /sbin/ip
+          - route
+      register: cache_route_table
+      changed_when: false
+
+    - name: Require a return route for every classroom subnet
+      ansible.builtin.assert:
+        that:
+          - cache_return_routes | reject('in', cache_route_table.stdout) | list | length == 0
+        fail_msg: >-
+          The cache is missing return routes to these classroom subnets:
+          {{ cache_return_routes | reject('in', cache_route_table.stdout) | list | join(', ') }}.
+          Without them the cache cannot reply to pods once the factory-time
+          prov0 interface is stripped, and the service will fail in the
+          classroom while passing every bench test.
+        success_msg: >-
+          Return routes present for all
+          {{ cache_return_routes | length }} classroom subnets.
+
+    - name: Wait for the cache to listen on its service address
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /bin/bash
+          - -c
+          - "ss -lntp | grep -q ':{{ cyberlab_cache_port }} ' && echo LISTENING"
+      register: acng_listen
+      changed_when: false
+      retries: 15
+      delay: 2
+      until: "'LISTENING' in (acng_listen.stdout | default(''))"
+
+    # Proving the service answers from the host is not the same as proving it
+    # answers on the network lab guests will use. Query the svc0 address
+    # specifically.
+    - name: Verify the cache answers on its svc0 address from the host
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -s
+          - -o
+          - /dev/null
+          - -w
+          - "%{http_code}"
+          - --connect-timeout
+          - "5"
+          - "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/acng-report.html"
+      register: acng_http
+      changed_when: false
+      failed_when: false
+
+    - name: Require the cache to answer on svc0
+      ansible.builtin.assert:
+        that:
+          - acng_http.stdout | trim in ['200', '401', '403']
+        fail_msg: >-
+          The cache did not answer on
+          http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/
+          (got '{{ acng_http.stdout | default('no response') }}'). The
+          container may be running with the service bound to the wrong
+          address -- check BindAddress in
+          /etc/apt-cacher-ng/zzz-cyberlab.conf inside CT
+          {{ cyberlab_cache_ctid }}.
+        success_msg: >-
+          Cache answering on
+          http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/
+
+    - name: Print cache summary
+      ansible.builtin.debug:
+        msg:
+          - "ctid={{ cyberlab_cache_ctid }}"
+          - "hostname={{ cyberlab_cache_hostname }}"
+          - "service_address=http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}"
+          - "seeding_nic_attached={{ cyberlab_cache_seed_nic | bool }}"
+          - "retention=pinned (ExThreshold 36500, daily cron disabled)"
+          - >-
+            proxy_line_for_images=Acquire::http::Proxy
+            "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}";
+          - "STRIP net1 BEFORE SHIPPING: pct set {{ cyberlab_cache_ctid }} --delete net1"

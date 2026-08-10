@@ -14,6 +14,15 @@ all:
           alias: Provisioning Network
           isolate_ports: false
 
+        # Service network for site-time infrastructure that lab guests must
+        # reach -- currently just the apt-cacher-ng package cache. Deliberately
+        # separate from prov0: prov0 is factory-time infrastructure stripped
+        # from every shipped unit, and a site-time service must not live on a
+        # factory-time network. See Phase 2.5 in docs/roadmap.md.
+        - name: svc0
+          alias: Service Network
+          isolate_ports: false
+
       subnets:
         - name: prov0
           subnet: 10.30.0.0/24
@@ -21,6 +30,21 @@ all:
           snat: true
           dhcp_start: 10.30.0.100
           dhcp_end: 10.30.0.199
+
+        # snat is false: the cache reaches upstream through its transient prov0
+        # interface at factory time, never through this one. Nothing on svc0
+        # has egress, which is the property that survives shipping.
+        #
+        # 10.31.0.0/24 is safe alongside prov0's 10.30.0.0/24 because section
+        # subnets are 10.<teacher_id>.<section_code>.0/24 and teacher_id starts
+        # at 101 by design, leaving the low octets free for infrastructure.
+        # That floor is enforced in scripts/generate_runtime_artifacts.py.
+        - name: svc0
+          subnet: 10.31.0.0/24
+          gateway: 10.31.0.1
+          snat: false
+          dhcp_start: 10.31.0.100
+          dhcp_end: 10.31.0.199
 
   children:
     proxmox_hosts:

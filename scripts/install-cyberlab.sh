@@ -21,6 +21,7 @@ readonly INVENTORY_FILE="inventory.yml"
 readonly HOST_BOOTSTRAP_PLAYBOOK="playbooks/host-bootstrap.yml"
 readonly CONTROLLER_VALIDATE_PLAYBOOK="playbooks/controller-validate-proxmox-api.yml"
 readonly CONTROLLER_SDN_PLAYBOOK="playbooks/controller-bootstrap-sdn.yml"
+readonly CONTROLLER_PACKAGE_CACHE_PLAYBOOK="playbooks/controller-bootstrap-package-cache.yml"
 readonly DETECT_CONTROLLER_NETWORK_SCRIPT_REL="scripts/detect-controller-network.sh"
 readonly CONTROLLER_NETWORK_VARS_REL="private/generated/controller-network.yml"
 readonly CONTROLLER_CTID_DEFAULT="800"
@@ -37,6 +38,9 @@ SKIP_NETWORK_DETECT="${CYBERLAB_SKIP_NETWORK_DETECT:-0}"
 ROTATE_API_TOKEN="${CYBERLAB_ROTATE_API_TOKEN:-0}"
 SKIP_CONTROLLER_VALIDATE="${CYBERLAB_SKIP_CONTROLLER_VALIDATE:-0}"
 SKIP_SDN_BOOTSTRAP="${CYBERLAB_SKIP_SDN_BOOTSTRAP:-0}"
+# Opt-in, not opt-out. The package cache is Phase 2.5 work and is off until it
+# is proven on the target hardware, the same way section VNets are.
+WITH_PACKAGE_CACHE="${CYBERLAB_WITH_PACKAGE_CACHE:-0}"
 QUIET="${CYBERLAB_QUIET:-0}"
 
 usage() {
@@ -55,6 +59,7 @@ Options:
   --skip-network-detect       Do not run scripts/detect-controller-network.sh
   --skip-controller-validate  Do not run controller API validation playbook
   --skip-sdn-bootstrap        Do not run controller SDN bootstrap playbook
+  --with-package-cache        Build the apt-cacher-ng package cache LXC (off by default)
   --rotate-api-token          Force recreation of the Proxmox API token and rewrite controller secret
   -q, --quiet                 Reduce status output
   -h, --help                  Show this help
@@ -69,6 +74,7 @@ Environment overrides:
   CYBERLAB_SKIP_NETWORK_DETECT=0|1
   CYBERLAB_SKIP_CONTROLLER_VALIDATE=0|1
   CYBERLAB_SKIP_SDN_BOOTSTRAP=0|1
+  CYBERLAB_WITH_PACKAGE_CACHE=0|1
 
 Network detector pass-through examples:
   CYBERLAB_CONTROLLER_VLAN=99 ${SCRIPT_NAME}
@@ -220,6 +226,10 @@ parse_args() {
         ;;
       --skip-sdn-bootstrap)
         SKIP_SDN_BOOTSTRAP=1
+        shift
+        ;;
+      --with-package-cache)
+        WITH_PACKAGE_CACHE=1
         shift
         ;;
       --rotate-api-token)
@@ -389,6 +399,17 @@ run_controller_sdn_bootstrap() {
   run_controller_playbook "${CONTROLLER_SDN_PLAYBOOK}"
 }
 
+# Opt-in. Depends on svc0, which controller-bootstrap-sdn.yml always builds as
+# an infrastructure network, so this must run after it rather than beside it.
+run_controller_package_cache() {
+  if [[ "${WITH_PACKAGE_CACHE}" != "1" ]]; then
+    log "Skipping package cache build (pass --with-package-cache to enable)"
+    return 0
+  fi
+
+  run_controller_playbook "${CONTROLLER_PACKAGE_CACHE_PLAYBOOK}"
+}
+
 show_runtime_summary() {
   log "Runtime configuration:"
   log "  repo_dir=${REPO_DIR}"
@@ -423,6 +444,7 @@ $(phase_line 0 "Controller CT ${CONTROLLER_CTID} bootstrap")
 $(phase_line 0 "Controller SSH trust bootstrap")
 $(phase_line "${SKIP_CONTROLLER_VALIDATE}" "Proxmox API validation from controller")
 $(phase_line "${SKIP_SDN_BOOTSTRAP}" "SDN zone and VNET bootstrap")
+$(phase_line "$((1 - WITH_PACKAGE_CACHE))" "Package cache LXC (Phase 2.5)")
 
 Useful checks:
   pct status ${CONTROLLER_CTID}
@@ -466,6 +488,7 @@ main() {
   assert_controller_running
   run_controller_validation
   run_controller_sdn_bootstrap
+  run_controller_package_cache
   show_success_summary
 }
 
