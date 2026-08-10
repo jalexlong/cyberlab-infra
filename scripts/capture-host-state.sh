@@ -223,7 +223,31 @@ record pct-list pct list
 record user-list pveum user list
 record role-list pveum role list
 record acl-list pveum acl list
-record token-list pveum user token list --output-format json
+
+# Tokens are addressed per user. `pveum user token list` with no userid exits
+# 400 "not enough arguments", and the capture then stores that error string
+# where the token inventory should be -- found 2026-08-07, when the capture
+# taken before the firewall work recorded exactly that. Same shape as the SDN
+# subnet problem below: a collection that has no collection-level listing.
+record_user_tokens() {
+  local out="${DEST}/facts/token-list.txt"
+  local users user
+  users="$(pveum user list --noborder --noheader 2>/dev/null | awk '{print $1}')" || true
+  if [[ -z "${users}" ]]; then
+    printf 'no users found\n' >"${out}"
+    log "  recorded token-list (no users)"
+    return 0
+  fi
+  : >"${out}"
+  for user in ${users}; do
+    printf '### user: %s\n' "${user}" >>"${out}"
+    pveum user token list "${user}" --output-format json >>"${out}" 2>&1 ||
+      warn "  token list for ${user} failed or unavailable"
+    printf '\n' >>"${out}"
+  done
+  log "  recorded token-list"
+}
+record_user_tokens
 
 log "Recording SDN"
 record sdn-zones pvesh get /cluster/sdn/zones --output-format json
