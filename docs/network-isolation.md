@@ -835,14 +835,65 @@ interface at all, which is the point.
 
 ### Optional egress, when a district permits it
 
-Egress is an optimization, never a requirement (Phase 2.5). Where allowed,
-open it narrowly and only on the uplink node:
+Egress is an optimization, never a requirement (Phase 2.5). Where allowed, open
+it narrowly and only on the uplink node.
+
+**Corrected 2026-08-18 — this section previously said "Hosts still do not" and
+that was wrong twice over.** It contradicted the roadmap, which has always said
+the box takes egress so "the host stays patched", and it described a rule that
+could not have worked:
 
 ```
-OUT ACCEPT -o vmbr0 -source +pkg_cache -p tcp -dport 80,443
+OUT ACCEPT -o vmbr0 -source +pkg_cache -p tcp -dport 80,443   # never applied; does not parse
 ```
 
-Only the cache reaches out, only on HTTP/HTTPS. Hosts still do not.
+**Proxmox's rule parser accepts `-i <iface>` only — there is no `-o`.** For an
+`OUT` rule `-i` names the *outgoing* interface. Verified by reading
+`PVE::Firewall::parse_fw_rule` on `pve1`, which matches exactly one interface
+option. The rule above was written, reviewed and never applied, so nothing
+caught it. `tests/test_firewall_policy.py` now rejects the `-o` spelling
+outright.
+
+**What the deny actually cost, measured on `pve1`.** With `policy_out: DROP`
+inherited from `cluster.fw` and no host `OUT` rules but DHCP, the node could not
+resolve a name, could not reach an apt mirror, could not clone from GitHub, and
+could not ping `1.1.1.1`. That had been true since the firewall was enabled on
+2026-08-07 and nobody noticed for eleven days, because inbound SSH is unaffected
+and CT `800` sits on the bridge unfiltered — so working *in* the controller
+looked normal while the host itself was dark.
+
+So the host gets its own narrow egress, written by
+`controller-bootstrap-firewall.yml` and disabled with
+`-e cyberlab_host_egress=false`:
+
+```
+OUT ACCEPT -i vmbr0 -p udp -dport 53 -log nolog       # DNS
+OUT ACCEPT -i vmbr0 -p tcp -dport 53 -log nolog       # DNS over TCP
+OUT ACCEPT -i vmbr0 -p tcp -dport 80,443 -log nolog   # apt, pveam, git over https
+OUT ACCEPT -i vmbr0 -p tcp -dport 22 -log nolog       # git over ssh
+OUT ACCEPT -i vmbr0 -p icmp -log nolog                # ping as a diagnostic
+```
+
+The interface is **discovered**, not hardcoded — it is whichever interface holds
+the management address, the same rediscovery the `schoolnet` alias uses.
+
+**Interface scoping is what makes this safe, and it is not decoration.** The
+host holds a gateway address on every section subnet, so an unscoped `OUT
+ACCEPT` would not merely grant internet access — it would also let the host
+initiate onto every student network. Scoped to the uplink, lab VNets are
+different interfaces and none of it applies. The inbound lab-subnet `DROP` is
+untouched, guest policy is still enforced at each guest's own tap, and the
+seventeen-row probe passes unchanged with these rules generated.
+
+NTP stays closed. `systemd-timesyncd` is inactive on `pve1`, and the roadmap
+wants one designated cluster time source rather than every node reaching a
+public pool — precisely the chatter this document exists to keep off the school
+network. Note the trap for later: a badly wrong clock breaks TLS, so a
+`git clone` failing on certificate validation is a symptom of no time source,
+not of these rules.
+
+The cache carve-out is unchanged and separate: the cache reaches upstream
+through its transient `prov0` interface at factory time, never through `svc0`.
 
 ---
 

@@ -167,6 +167,68 @@ def test_host_fw_has_outbound_dhcp():
     )
 
 
+def test_host_egress_is_scoped_to_an_interface():
+    """Unscoped host egress would let the node initiate onto student VNets.
+
+    The host holds a gateway address on every section subnet, so an OUT ACCEPT
+    with no interface is not merely "the host can reach the internet" -- it is
+    also "the host can reach every lab network", which is the one direction the
+    isolation design does not otherwise constrain.
+    """
+    host_fw = _written_content(BOOTSTRAP, "host.fw")
+
+    egress = [
+        line
+        for line in host_fw.splitlines()
+        if line.startswith("OUT ACCEPT") and "67:68" not in line
+    ]
+    assert egress, "host.fw writes no egress rules at all; the node cannot patch or fetch"
+
+    unscoped = [line for line in egress if "-i " not in line]
+    assert not unscoped, (
+        "host.fw egress rules are not scoped to an interface: "
+        f"{unscoped}. Scope them to the uplink, which the playbook discovers "
+        "from the interface holding the management address."
+    )
+
+
+def test_host_egress_never_uses_the_dash_o_spelling():
+    """`-o` is silently not a thing. Proxmox's parser accepts `-i` only.
+
+    Verified against PVE::Firewall::parse_fw_rule on pve1, 2026-08-18: the only
+    interface option matched is `-i <iface>`, and for an OUT rule that names the
+    outgoing interface. docs/network-isolation.md carried an `-o vmbr0` example
+    for months; it was never applied, and would not have done what it read like.
+    """
+    host_fw = _written_content(BOOTSTRAP, "host.fw")
+    offenders = [
+        line
+        for line in host_fw.splitlines()
+        if re.match(r"^(IN|OUT|FORWARD)\s", line) and re.search(r"\s-o\s", line)
+    ]
+    assert not offenders, (
+        f"host.fw uses the `-o` interface spelling: {offenders}. Proxmox parses "
+        "`-i` only; `-o` does not scope the rule to anything."
+    )
+
+
+def test_host_egress_opens_dns_or_nothing_resolves():
+    """apt and git both fail at name resolution first, and confusingly.
+
+    A ruleset with 443 but no 53 produces "Could not resolve host", which reads
+    like a broken uplink rather than a firewall rule.
+    """
+    host_fw = _written_content(BOOTSTRAP, "host.fw")
+    if not any(line.startswith("OUT ACCEPT") and "-dport 80,443" in line for line in host_fw.splitlines()):
+        return
+    # \b matters: without it this matches `-dport 5300` and the test passes
+    # while DNS is shut. Caught by mutating the playbook, 2026-08-18.
+    assert re.search(r"^OUT ACCEPT .*-dport 53\b", host_fw, re.MULTILINE), (
+        "host.fw permits outbound HTTP/HTTPS but not DNS. Every apt and git "
+        "operation resolves a name before it opens a socket."
+    )
+
+
 def test_host_fw_declares_no_policy_directives():
     """host.fw rejects policy_in/policy_out as unparseable — trap 3 of five."""
     host_fw = _written_content(BOOTSTRAP, "host.fw")

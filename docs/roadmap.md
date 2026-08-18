@@ -773,6 +773,18 @@ stays patched, and an apt caching proxy serves packages *into* the isolated
 section VNets so lab guests can `apt install` without SNAT and without any
 path off the box.
 
+**That intent was not implemented, and the gap was invisible for eleven days.**
+Enabling the datacenter firewall on 2026-08-07 brought `policy_out: DROP` with
+it, which the host inherits, and no host `OUT` rules existed beyond DHCP.
+Measured 2026-08-18: `pve1` could not resolve a name, reach an apt mirror, clone
+from GitHub, or ping `1.1.1.1`. Inbound SSH was unaffected and CT `800` sits
+unfiltered on the bridge, so the host looked healthy from every angle an
+operator normally looks. `docs/network-isolation.md` had meanwhile hardened the
+mistake into a design statement — "Hosts still do not" — contradicting this
+paragraph. Both are now reconciled in favour of this one, and
+`controller-bootstrap-firewall.yml` writes uplink-scoped host egress (DNS, HTTP,
+HTTPS, git-over-SSH, ICMP) under `cyberlab_host_egress`, default true.
+
 This is the right shape, and it preserves the property that matters. Section
 VNets keep `snat: false` (`controller-bootstrap-sdn.yml`), so the Phase 5
 isolation test still asserts what it should: no route to the internet, the

@@ -36,6 +36,22 @@
     # so the default is on.
     cyberlab_firewall_enable: true
 
+    # Host egress on the uplink: DNS, apt, git, ICMP. Default true because a
+    # node that cannot patch itself or fetch this repository is a node an
+    # operator has to sit in front of, and because the roadmap's connectivity
+    # constraint is "assume none; use it if present" -- permitting egress does
+    # not require it to exist, and the rules are inert on an air-gapped unit.
+    #
+    # This is the ONE place lab isolation and host convenience could be confused
+    # for each other, so state the boundary plainly: it opens the HOST's own
+    # outbound path on the uplink interface only. Lab guests are filtered at
+    # their own tap by the lab-guest group in cluster.fw and are entirely
+    # unaffected -- the 2026-08-18 probe run confirms all seventeen rows,
+    # internet included, with these rules in the generated set.
+    #
+    # Set false for a district that requires a demonstrably silent appliance.
+    cyberlab_host_egress: true
+
     # Whether to reconcile per-guest `.fw` files and the `firewall=1` NIC flag.
     # Both halves matter and they are stored separately -- see the guest tasks
     # below for why that separation is the single most dangerous thing here.
@@ -189,7 +205,11 @@
                 except ValueError:
                     continue
                 if iface.ip == wanted:
-                    print(iface.network)
+                    # network and interface name, space separated. The interface
+                    # is what host egress rules are scoped to, so that they can
+                    # never permit the host onto a lab VNet -- see the egress
+                    # block in host.fw.
+                    print(iface.network, fields[1])
                     break
           - "{{ mgmt_address }}"
       register: mgmt_network_result
@@ -202,7 +222,9 @@
     # is a parse error that takes the whole firewall down with it.
     - name: Record the management network
       ansible.builtin.set_fact:
-        schoolnet_cidr: "{{ mgmt_network_result.stdout | trim }}"
+        schoolnet_cidr: "{{ (mgmt_network_result.stdout | trim).split(' ') | first | default('', true) }}"
+        uplink_iface: "{{ ((mgmt_network_result.stdout | trim).split(' ') | length > 1)
+                          | ternary((mgmt_network_result.stdout | trim).split(' ') | last, '') }}"
 
     - name: Note when the management network could not be discovered
       ansible.builtin.debug:
@@ -289,6 +311,40 @@
           # factory-time infrastructure, not a student-facing network. Section
           # VNets get no DNS at all -- see the cluster.fw note on port 53.
           IN ACCEPT -source dc/provnet -p udp -dport 53 -log nolog
+          {% if cyberlab_host_egress | bool and uplink_iface %}
+
+          # ---------------------------------------------------------------
+          # Host egress, on the uplink interface only.
+          #
+          # cluster.fw sets policy_out DROP and the host inherits it, so
+          # WITHOUT these rules the node cannot resolve a name, reach an apt
+          # mirror, clone from GitHub, or ping anything. Measured 2026-08-18 on
+          # pve1: DNS, ICMP and TCP/443 all failed from the host itself, and had
+          # done since the firewall was enabled on 2026-08-07. Nobody noticed,
+          # because inbound SSH is unaffected and the controller CT sits on the
+          # bridge unfiltered, so container git pulls kept working.
+          #
+          # Scoped to {{ uplink_iface }}, the interface holding the management
+          # address, discovered rather than hardcoded. That scoping is what
+          # keeps this from being a hole: lab VNets are different interfaces, so
+          # nothing here lets the host initiate onto a student network, and the
+          # inbound lab-subnet DROP above is untouched. Students gain nothing
+          # from any of it -- guest policy is enforced at their own tap.
+          #
+          # NTP is deliberately absent. `systemd-timesyncd` is inactive on this
+          # node and the roadmap wants one designated cluster time source rather
+          # than every node reaching a public pool, which is exactly the kind of
+          # chatter docs/network-isolation.md exists to keep off the school
+          # network. Add udp/123 here, to one address, if a time source is ever
+          # sited off-box -- and note that a badly wrong clock breaks TLS, so
+          # `git clone` failing with a certificate error is a symptom of this,
+          # not of the firewall.
+          OUT ACCEPT -i {{ uplink_iface }} -p udp -dport 53 -log nolog # DNS
+          OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 53 -log nolog # DNS over TCP
+          OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 80,443 -log nolog # apt, pveam, git over https
+          OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 22 -log nolog # git over ssh
+          OUT ACCEPT -i {{ uplink_iface }} -p icmp -log nolog # so ping is a usable diagnostic
+          {% endif %}
 
     - name: Write the datacenter firewall policy
       ansible.builtin.copy:
