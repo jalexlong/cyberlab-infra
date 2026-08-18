@@ -368,6 +368,70 @@ ICMP.
 This is the assertion half proving itself against a state that was
 independently measured.
 
+### Re-verified 2026-08-18, and the reboot that broke the cache silently
+
+The same run was repeated on 2026-08-18, after `pve1` rebooted on 2026-08-17.
+**Tier 1 passed and tier 2 failed on exactly one row of seventeen:**
+
+```
+reachable  blocked    package cache 10.31.0.10:3142   <<< MISMATCH
+```
+
+Every isolation row still held — management, cross-section, `prov0`, internet
+and DNS all blocked. What broke was the *carve-out*: the thing students need,
+not the thing that contains them. It had been broken for 22 hours.
+
+**Two independent faults, one root cause: a boot race nothing waits out.** At
+`19:46:41.936` ifupdown began configuring the container's interfaces and did not
+finish until `19:46:43.557`. In that 1.6-second window:
+
+- `cyberlab-cache-routes.service` ran at `19:46:42.221` and died on
+  `Error: Nexthop has invalid gateway` — `eth0` had no address, so `10.31.0.1`
+  was not on-link. All four classroom return routes were absent.
+- `apt-cacher-ng` started at `19:46:42.206`, logged
+  `Couldn't bind socket: Cannot assign requested address` **twice**, bound
+  `127.0.0.1` alone — and reported `Started`, exit zero.
+
+The route unit already declared `After=network-online.target`. **That target is
+meaningless in this container**: Proxmox's Debian image ships
+`systemd-networkd-wait-online` disabled, so nothing holds the target open until
+interfaces are configured, and it is reached trivially at boot. A dependency
+that looks correct and is satisfied by the wrong unit is this project's
+recurring failure class — `hosts: poseidon` and the discarded `username_policy`
+are the same shape.
+
+**The acng failure is the more dangerous of the two, because it fails into
+looking healthy.** `systemctl is-active` said `active` the entire time. Any
+monitoring that asks whether the service is running would have reported green
+while the cache served nobody. Half its binds failed and it called that success.
+
+Fixes, both in `controller-bootstrap-package-cache.yml`:
+
+- The route unit orders after `networking.service` as well, and blocks on an
+  `ExecStartPre` that waits for `eth0` to hold an address, bounded by
+  `TimeoutStartSec=45` so a genuine failure is loud rather than hung.
+- `apt-cacher-ng` gets a drop-in requiring and ordering after that unit, so the
+  daemon cannot start before the addresses it binds exist. `Requires=`, not just
+  `After=`: a cache that is plainly down is easier to diagnose than one bound to
+  the wrong address.
+- The playbook's own listen check now greps for `10.31.0.10:3142` rather than
+  `:3142`, which a loopback-only bind satisfies.
+
+**And tier 1 gained the check that would have caught this on the next deploy**
+— the route unit is active, the container is bound on the svc0 address, and a
+return route exists per section. Note what it deliberately does *not* do: curl
+the cache from the host. Measured the same day, a host-side curl times out while
+a pod gets `HTTP 200` from that address, because the host's own outbound path is
+filtered once the datacenter firewall is on. Checking a service from a vantage
+point that is not the consumer's reports failures that are not real.
+
+After both repairs, tier 2 passed all seventeen rows including the control.
+
+**The lesson for the appliance is the sequencing one.** This was a plain reboot
+on a bench, with the author watching. In a classroom it would have surfaced as
+"apt is broken" weeks later, with the firewall — the thing most likely to be
+blamed — entirely innocent.
+
 ### The generated rules, diffed against the hand-placed ones
 
 `controller-bootstrap-firewall.yml` supports `--check --diff`, which is the

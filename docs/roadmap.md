@@ -1133,6 +1133,16 @@ wants a hand on the cable.
   test that cannot pass for the wrong reason; a wrong rule or a stale route
   can still resolve and still fetch.
 - Cache contents survive a reboot of the container and its host.
+  **Measured 2026-08-18, and this criterion was too narrow.** The cached
+  *contents* survived the 2026-08-17 reboot exactly as intended. The *service*
+  did not: the return-route unit and `apt-cacher-ng` both lost a race with
+  interface configuration, leaving the cache with no routes to any section and
+  bound to loopback alone — for 22 hours, while `systemctl is-active` reported
+  `active`. Both are fixed in `controller-bootstrap-package-cache.yml`; the full
+  timeline is in `docs/network-isolation.md`. **Restate the criterion as: a lab
+  guest completes an install through the cache after a cold boot of the host**,
+  since that is the claim the district actually depends on and the only form of
+  it that a silent bind failure cannot satisfy.
 
 **What this reduces the district ask to.** With the cache seeded and the
 firewall enforcing isolation, the appliance needs exactly one thing from a
@@ -1616,10 +1626,41 @@ is the state that session left behind, then what is next.
    now rediscovered from the interface holding the management address, so no
    site-specific value is hardcoded anywhere in this work
 
+   **Re-diffed 2026-08-18, after a host reboot, and the result is unchanged.**
+   Worth having done separately rather than trusting the 08-10 run: the host
+   came up again in between, and the 08-10 diff was taken before that. Filtering
+   the diff down to lines that are not comments, the *entire* delta across
+   `host.fw`, `cluster.fw`, `950.fw` and `955.fw` is the one added `svcnet`
+   alias — no rule is added, removed, or altered, and `schoolnet` rediscovers
+   the identical `10.64.62.0/23` the hand-placed file carried. The NIC-flag task
+   skipped both guests, confirming they still hold `firewall=1`, so an apply
+   writes files only and disturbs no lease.
+
    **Still owed: actually applying it.**
    `controller-bootstrap-firewall.yml` has not been run outside check mode, so
    `pve1` still runs the hand-placed set. Given the diff, this is now a low-risk
    step rather than an unknown one
+
+   **Blocking discovery, 2026-08-18: CT `800`'s checkout is four commits stale**
+   — at `84c0d1b`, which *predates every firewall playbook in this item*. So
+   `install-cyberlab.sh --with-firewall`, which runs its playbooks inside the
+   controller (`run_controller_playbook`, via `pct exec`), cannot currently run
+   this work at all; the 08-10 and 08-18 diffs were both taken from a laptop
+   checkout instead. The controller's two uncommitted changes — the `svc0`
+   inventory block and `controller-bootstrap-package-cache.yml`, both left over
+   from the 08-07 session — were verified byte-identical to what is now
+   committed, so the fast-forward loses nothing. **Do this before item 6**, or
+   the wiped-host run proves the reproducibility of a checkout that does not
+   contain the thing being proved.
+
+   **Also found: `ansible/ansible.cfg` is not portable off the controller.** It
+   sets the `community.general.yaml` stdout callback, removed in
+   `community.general` 12.0.0, so `ansible-playbook` fails outright on a current
+   collection — the laptop needs
+   `ANSIBLE_STDOUT_CALLBACK=default ANSIBLE_CALLBACK_RESULT_FORMAT=yaml` to run
+   anything. The controller pins an older collection and is unaffected, which is
+   why this stayed hidden. Replace it with `result_format=yaml` under
+   `[defaults]`, which is the supported spelling and needs no collection
 5. **Bake the cache client config into the template images.** The proxy line
    *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
    `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
@@ -1663,14 +1704,34 @@ Recorded because the next session starts here, not from a clean host:
   `/etc/pve/firewall/cluster.fw`, `/etc/pve/nodes/pve1/host.fw`, and per-guest
   `950.fw`/`955.fw`. Since 2026-08-10 the repository *can* write them —
   `controller-bootstrap-firewall.yml` — but has not: the host still runs the
-  hand-placed set, and the two have never been diffed on hardware.
+  hand-placed set. The two **have** been diffed on hardware, on 2026-08-10 and
+  again on 2026-08-18 after a host reboot; both runs agree that the generated
+  set differs from the running one only by comment text and one unreferenced
+  `svcnet` alias. See item 4 under Immediate next actions.
 - **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
   `t101c213`) plus the new `svc0`. They were absent before this session.
 - **CT `801`** runs the package cache, still dual-homed with its `prov0`
-  seeding NIC attached.
-- **Disposable guests `950` and `955` are still running.** `955` was moved onto
-  `t101c011` for a same-section control test, so the cross-section rig needs it
-  moved back to `t101c112` to be reused. Destroy both with
+  seeding NIC attached. **Repaired 2026-08-18** after the reboot left it with no
+  return routes and bound to loopback — see the Phase 2.5 exit note. The repair
+  was applied to the live container by hand as well as to the playbook, so `801`
+  currently carries a `cyberlab-wait-for-net.conf` drop-in that a rebuild would
+  reproduce from the playbook.
+- **Tier 2 of the isolation assertions passed all seventeen rows on
+  2026-08-18**, after that repair, from guest `950` with `955` as the
+  same-section control. Guests `950` and `955` were started for that run and
+  left running.
+- **Disposable guests `950` and `955` both sit on `t101c011`** —  `955` was
+  moved there for a same-section control test. **Leave them that way:** as
+  `scripts/isolation-probe.sh` was actually written, the same-section peer is
+  the *control* the whole matrix depends on (`--peer`, and the script refuses to
+  interpret any `blocked` verdict without it), while other sections are probed
+  by *gateway* address and by `.100` in their subnet — neither of which needs a
+  guest over there. An earlier draft of this note said the cross-section rig
+  needed `955` moved back to `t101c112`; that describes the hand probe of
+  2026-08-07, not the committed script, and following it would break tier 2's
+  control instead of enabling anything.
+  **Both were stopped as of 2026-08-18** (uptime says the host rebooted on
+  2026-08-17), so tier 2 needs them started first. Destroy them with
   `qm stop <id> && qm destroy <id> --purge` — and note that purge also deletes
   their `.fw` files.
 - **Pre-change capture** at `/root/cyberlab-captures/pve1-20260807-081810`;

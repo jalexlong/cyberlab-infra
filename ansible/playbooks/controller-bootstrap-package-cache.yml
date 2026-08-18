@@ -284,6 +284,27 @@
     # snippet because pct rewrites that file whenever a NIC is reconciled, and
     # a route that disappears when net1 is stripped is precisely the bug this
     # exists to fix.
+    #
+    # `After=network-online.target` is NOT sufficient here, and believing it was
+    # cost this service 22 hours of silent downtime after the 2026-08-17 reboot.
+    # Measured from the container's own journal:
+    #
+    #   19:46:41.936  networking: Configuring network interfaces
+    #   19:46:42.221  Starting cyberlab-cache-routes.service
+    #   19:46:42.318  ip: Error: Nexthop has invalid gateway
+    #   19:46:43.557  Finished networking.service
+    #
+    # The unit ran 1.3s BEFORE ifupdown finished, so eth0 had no address and
+    # 10.31.0.1 was not on-link. `network-online.target` only means "the network
+    # is up" where something implements the wait, and Proxmox's Debian container
+    # ships `systemd-networkd-wait-online` disabled, so the target is reached
+    # trivially and orders after nothing that matters. A dependency that looks
+    # correct and is satisfied by the wrong unit is this repository's recurring
+    # failure class -- see `hosts: poseidon` and the discarded `username_policy`.
+    #
+    # So: order after the unit that actually configures the interface, AND wait
+    # for the address to exist before touching the routing table. Type=oneshot
+    # cannot use Restart=, so the retry has to live inside the unit.
     - name: Install persistent return routes to the classroom subnets
       ansible.builtin.command:
         argv:
@@ -298,12 +319,14 @@
             printf '%s\n'
             '[Unit]'
             'Description=Cyberlab cache return routes to classroom subnets'
-            'After=network-online.target'
+            'After=network-online.target networking.service'
             'Wants=network-online.target'
             ''
             '[Service]'
             'Type=oneshot'
             'RemainAfterExit=yes'
+            'TimeoutStartSec=45'
+            'ExecStartPre=/bin/sh -c "until ip -4 addr show dev eth0 | grep -q \"inet \"; do sleep 1; done"'
             {% for r in cache_return_routes %}
             'ExecStart=/sbin/ip route replace {{ r }} via {{ cyberlab_cache_svc_ip | regex_replace("\.[0-9]+$", ".1") }} dev eth0'
             {% endfor %}
@@ -317,6 +340,48 @@
             echo ROUTES_APPLIED
       register: cache_routes
       changed_when: "'ROUTES_APPLIED' in cache_routes.stdout"
+
+    # The route unit was not the only thing that lost the boot race on
+    # 2026-08-17, and the second casualty failed far more quietly. From the
+    # container's journal, 0.3s after ifupdown started:
+    #
+    #   19:46:42.206  Starting apt-cacher-ng.service
+    #   19:46:42.540  Couldn't bind socket: Cannot assign requested address
+    #   19:46:42.540  Couldn't bind socket: Cannot assign requested address
+    #   19:46:42.540  Started apt-cacher-ng.service
+    #
+    # Two BindAddress entries did not exist yet, so acng bound 127.0.0.1, kept
+    # running, and EXITED ZERO. `systemctl is-active` reported `active` for the
+    # next 22 hours while the cache answered nobody. A service that fails half
+    # its binds and calls that success cannot be monitored by asking whether it
+    # is running -- which is why the isolation assertions now curl the svc0
+    # address rather than trusting unit state.
+    #
+    # Requires= rather than just After=: if the routes cannot be installed the
+    # cache is useless anyway, and a service that is plainly DOWN is far easier
+    # to diagnose than one listening on the wrong address. Fail closed and loud.
+    - name: Order the cache daemon behind interface configuration
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - /bin/bash
+          - -c
+          - >-
+            set -e;
+            mkdir -p /etc/systemd/system/apt-cacher-ng.service.d;
+            printf '%s\n'
+            '# Managed by controller-bootstrap-package-cache.yml.'
+            '[Unit]'
+            'After=cyberlab-cache-routes.service'
+            'Requires=cyberlab-cache-routes.service'
+            > /etc/systemd/system/apt-cacher-ng.service.d/cyberlab-wait-for-net.conf;
+            systemctl daemon-reload;
+            echo ORDERING_APPLIED
+      register: cache_ordering
+      changed_when: "'ORDERING_APPLIED' in cache_ordering.stdout"
 
     - name: Show the cache routing table
       ansible.builtin.command:
@@ -353,7 +418,10 @@
           - --
           - /bin/bash
           - -c
-          - "ss -lntp | grep -q ':{{ cyberlab_cache_port }} ' && echo LISTENING"
+          # The svc0 address specifically, not the port alone. A bare port grep
+          # passes when acng is bound to 127.0.0.1 and nothing else, which is
+          # exactly the state the 2026-08-17 boot race produced.
+          - "ss -lntp | grep -q '{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }} ' && echo LISTENING"
       register: acng_listen
       changed_when: false
       retries: 15

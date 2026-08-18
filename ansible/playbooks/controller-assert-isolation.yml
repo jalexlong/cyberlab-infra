@@ -48,6 +48,9 @@
 
     cyberlab_cache_svc_ip: 10.31.0.10
     cyberlab_cache_port: 3142
+    # Must match controller-bootstrap-package-cache.yml, which is where the
+    # container and its return routes are actually created.
+    cyberlab_cache_ctid: 801
 
     repo_root: "{{ playbook_dir }}/../.."
     environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
@@ -167,6 +170,73 @@
           that container -- SSH included -- to every student in the building.
           Verified 2026-08-07: 3142 answers, 22 and ICMP do not.
         success_msg: "cache carve-out: {{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}, port-scoped"
+
+    # Permitting the carve-out is not the same claim as the carve-out working,
+    # and on 2026-08-18 those came apart: every assertion above passed while the
+    # cache had been unable to answer a single pod for 22 hours. Its return
+    # routes live in a systemd unit inside the container (see
+    # controller-bootstrap-package-cache.yml), that unit lost a race with
+    # ifupdown at boot, and nothing noticed -- tier 1 read only rule text, and
+    # tier 2 is opt-in. Only the live probe caught it.
+    #
+    # So tier 1 now checks the half of the carve-out that lives outside the
+    # firewall. This is still configuration rather than packets: it asserts the
+    # unit is active and the routes are in the table, not that apt works. Tier 2
+    # remains the only thing that proves the latter.
+    - name: Read the package cache return-route state
+      ansible.builtin.shell: |
+        set -o pipefail
+        if ! pct status {{ cyberlab_cache_ctid }} 2>/dev/null | grep -q running; then
+          echo "CACHE_ABSENT"
+          exit 0
+        fi
+        echo "UNIT=$(pct exec {{ cyberlab_cache_ctid }} -- systemctl is-active cyberlab-cache-routes.service 2>&1 | tr -d '\n')"
+        # Unit state is not evidence: on 2026-08-17 apt-cacher-ng failed both
+        # non-loopback binds, exited zero, and reported `active` for 22 hours.
+        # Ask which addresses it actually holds.
+        #
+        # Deliberately NOT a curl from the host. The host cannot open a
+        # connection to the cache -- its own outbound path is filtered once the
+        # datacenter firewall is on -- so a host-side HTTP check reports a dead
+        # cache when the cache is healthy. Measured 2026-08-18: host curl times
+        # out while a pod gets HTTP 200 from the same address. Tier 1 asks the
+        # container what it is bound to; proving the path belongs to tier 2.
+        echo "BOUND=$(pct exec {{ cyberlab_cache_ctid }} -- ss -lnt 2>/dev/null | grep -c '{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }} ')"
+        pct exec {{ cyberlab_cache_ctid }} -- ip route
+      args:
+        executable: /bin/bash
+      register: cache_route_state
+      changed_when: false
+      failed_when: false
+
+    - name: Require the cache to answer, and to hold a route to every section
+      ansible.builtin.assert:
+        that:
+          - "'UNIT=active' in cache_route_state.stdout"
+          - "'BOUND=0' not in cache_route_state.stdout"
+          - section_subnets | reject('in', cache_route_state.stdout) | list | length == 0
+        fail_msg: >-
+          The package cache is not serving every section. Route unit:
+          {{ (cache_route_state.stdout_lines | select('match', '^UNIT=') | list | first) | default('unknown') }};
+          listeners on {{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}:
+          {{ (cache_route_state.stdout_lines | select('match', '^BOUND=') | list | first) | default('unknown') }};
+          missing routes: {{ section_subnets | reject('in', cache_route_state.stdout) | list | join(', ') | default('none', true) }}.
+          The cache lives on svc0 and every pod is off-subnet, so a missing
+          route breaks apt for every student while the firewall, the container
+          and the service all still look healthy. BOUND=0 with the unit `active`
+          means acng bound loopback only -- it does that silently when it starts
+          before ifupdown finishes. Re-run
+          controller-bootstrap-package-cache.yml.
+        success_msg: "cache: bound on svc0, one return route per section"
+      when: "'CACHE_ABSENT' not in cache_route_state.stdout"
+
+    - name: Note that the package cache is not running
+      ansible.builtin.debug:
+        msg: >-
+          CT {{ cyberlab_cache_ctid }} is not running, so the cache return
+          routes were not checked. The firewall carve-out above is permitted but
+          leads nowhere.
+      when: "'CACHE_ABSENT' in cache_route_state.stdout"
 
     # The single most valuable negative assertion in this playbook. DNS was the
     # finding nobody predicted: the zone's dnsmasq is a fully recursive
