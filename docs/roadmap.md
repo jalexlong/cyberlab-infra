@@ -387,7 +387,19 @@ only needs to clone from images already present.
   clones require the template on the same storage as the clone.
 - **Time.** Offline means no NTP. Clock drift breaks TLS validation, Guacamole
   tokens, and Proxmox corosync membership. Designate one node as the cluster
-  time source.
+  time source. **Partially addressed 2026-08-19 for the connected case:** `pve1`
+  syncs from one pinned upstream (`162.159.200.1`), set by `host-bootstrap.yml`
+  and permitted by a destination-scoped rule in the firewall playbook. That is
+  the *connected* answer and it does not solve the offline one — an air-gapped
+  unit still needs an in-cluster source, at which point both the rule and the
+  server address point inward instead and the egress goes away.
+
+  Worth recording how this surfaced, because it is the shape of failure this
+  phase should expect: enabling the firewall on 2026-08-07 silently closed
+  udp/123, `chrony` stayed enabled and retried into a DROP for twelve days, and
+  the node was left neither quiet nor on time. Nothing alerted; it was found by
+  re-reading a stale line in `docs/network-isolation.md` that claimed chrony was
+  syncing.
 - **DNS.** No upstream resolver. Ship a local one for lab names.
 - **Certificates.** Guacamole over HTTPS on an offline box has no public CA
   path. Either ship an internal CA and accept the distribution problem, or
@@ -1775,9 +1787,19 @@ below name when each fact was established, not when it was written.
   2026-08-18) and both showed rule-level identity, which is why it was a
   low-risk step rather than a leap.
 - **The host has its own egress again**, on the uplink interface only: DNS,
-  HTTP/HTTPS, git-over-SSH and ICMP. It had none between 2026-08-07 and
-  2026-08-18 — see the egress note under "Egress and the apt cache". `apt-get
-  update`, `git clone` and `ping` all work from an SSH session on `pve1`.
+  HTTP/HTTPS, git-over-SSH, ICMP, and NTP to one pinned address. It had none
+  between 2026-08-07 and 2026-08-18 — see the egress note under "Egress and the
+  apt cache". `apt-get update`, `git clone` and `ping` all work from an SSH
+  session on `pve1`.
+- **The clock is correct again as of 2026-08-19.** `chrony` had been enabled and
+  unsynchronised since the firewall went on; it now tracks one upstream, with
+  the distribution's `pool` line commented out in `/etc/chrony/chrony.conf` and
+  the replacement in `/etc/chrony/conf.d/cyberlab-timesource.conf`. **Both files
+  were written by hand to match `host-bootstrap.yml` byte for byte**, because
+  that playbook targets `proxmox_hosts` (local connection) and so must run on
+  the node itself, against a checkout that is currently 13 commits behind. A
+  later run should report no change on those tasks; if it reports a change, the
+  hand edit and the playbook have drifted and the playbook wins.
 - **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
   `t101c213`) plus the new `svc0`. They were absent before this session.
 - **CT `801`** runs the package cache, still dual-homed with its `prov0`

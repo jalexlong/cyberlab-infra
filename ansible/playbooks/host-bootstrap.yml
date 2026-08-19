@@ -4,6 +4,20 @@
   gather_facts: false
 
   vars:
+    # Time source. See the chrony tasks below for why this is one address
+    # rather than a pool, and note the coupling: cyberlab_ntp_server here and
+    # the destination-scoped udp/123 rule in controller-bootstrap-firewall.yml
+    # must name the same host, or the node goes quietly unsynchronised.
+    #
+    # 162.159.200.1 is Cloudflare's anycast NTP service, chosen because a pinned
+    # firewall rule needs a stable address and pool members rotate. Verified
+    # answering from this network on 2026-08-19 (stratum 3), as were
+    # time.google.com and the Debian pool -- so the district permits outbound
+    # NTP, which was not a given. No internal source answered: neither the
+    # three district resolvers nor the default gateway replied on udp/123.
+    cyberlab_manage_time: true
+    cyberlab_ntp_server: 162.159.200.1
+
     controller_ctid: 800
     controller_repo_dir: /root/cyberlab-infra
     controller_private_dir: /root/cyberlab-infra/private
@@ -206,6 +220,68 @@
         state: stopped
         enabled: false
       become: true
+
+    # ---------------------------------------------------------------------
+    # Time source.
+    #
+    # Measured on pve1, 2026-08-19: chrony was enabled, running, and
+    # UNSYNCHRONISED -- Reach 0 against six pool servers, Stratum 0, Reference
+    # ID 00000000. Enabling the datacenter firewall closed udp/123 in
+    # 2026-08-07 and nothing reopened it, so the daemon had been retrying into a
+    # DROP for eleven days. The node was neither quiet nor on time, which is the
+    # worst of both intents.
+    #
+    # A wrong clock is worth more attention than it usually gets here: it breaks
+    # TLS certificate validation, Guacamole session tokens, and corosync
+    # membership once there is a cluster -- and each of those fails in a way
+    # that points anywhere but at the clock.
+    #
+    # One server, by address, rather than a pool. The firewall rule that lets
+    # this out is destination-scoped (controller-bootstrap-firewall.yml), and a
+    # pool name resolves to rotating addresses that such a rule cannot follow.
+    # Cloudflare's is anycast and stable; the roadmap's eventual answer is a
+    # designated in-cluster time source, at which point this points there and
+    # the egress rule goes away entirely.
+    - name: Point chrony at the single designated time source
+      ansible.builtin.copy:
+        dest: /etc/chrony/conf.d/cyberlab-timesource.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by host-bootstrap.yml. Do not edit by hand.
+          #
+          # Overrides the distribution's pool directives. See the note in the
+          # playbook: the matching firewall rule is scoped to this address, so
+          # changing it here without changing cyberlab_ntp_server there leaves
+          # the host silently unsynchronised.
+          server {{ cyberlab_ntp_server }} iburst
+      become: true
+      register: chrony_conf
+      when: cyberlab_manage_time | bool
+
+    # The stock pool lines live in /etc/chrony/chrony.conf, which conf.d does
+    # not override -- both sets of servers would be used, and the pool half
+    # would sit at Reach 0 forever behind the destination-scoped rule. Comment
+    # them out rather than rewriting a distribution file wholesale.
+    - name: Retire the distribution pool directives
+      ansible.builtin.replace:
+        path: /etc/chrony/chrony.conf
+        regexp: '^(\s*)(pool\s+.*)$'
+        replace: '\1# \2  # retired by host-bootstrap.yml, see conf.d/cyberlab-timesource.conf'
+      become: true
+      register: chrony_pool_retired
+      when: cyberlab_manage_time | bool
+
+    - name: Restart chrony when its configuration changed
+      ansible.builtin.systemd_service:
+        name: chrony
+        state: restarted
+        enabled: true
+      become: true
+      when:
+        - cyberlab_manage_time | bool
+        - chrony_conf.changed or chrony_pool_retired.changed
 
     - name: Check whether Proxmox automation user exists
       command: "pveum user list"

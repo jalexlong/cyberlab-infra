@@ -38,7 +38,7 @@ draft assumptions were wrong, and are corrected throughout.
 | `net.ipv4.ip_forward` | `1` |
 | Bridge STP | `0` (off) on `vmbr0` and `prov0` |
 | `avahi-daemon` | **Not installed** — only `libavahi-*` client libraries |
-| Time sync | `chrony` **active and syncing to the public pool** (2026-08-05; as of 2026-08-19 it is active but **unsynchronised** — see below) |
+| Time sync | `chrony` **active and syncing to the public pool** (2026-08-05; unsynchronised 2026-08-07 to 2026-08-19; now one pinned upstream — see below) |
 
 ### What this changes
 
@@ -67,10 +67,30 @@ draft assumptions were wrong, and are corrected throughout.
   unsynchronised. So the node is not quiet (a daemon retries forever into a
   DROP) *and* has no time source (the clock free-runs on the RTC).
 
-  Pick one deliberately rather than leaving this. Either **disable `chrony`**,
-  which matches the suppression goal and accepts RTC drift until a cluster time
-  source exists; or **allow udp/123 to one named upstream** and keep the clock
-  honest. The consequence of drift is not abstract: TLS certificate validation,
+  **Resolved 2026-08-19: one upstream, by address.** `host.fw` carries a
+  destination-scoped `OUT ACCEPT ... -dest 162.159.200.1 -p udp -dport 123`, and
+  `host-bootstrap.yml` points `chrony` at that same address while commenting out
+  the distribution's `pool` line. Result on `pve1`: one source, `^*` selected,
+  Stratum 4, offset -376us, `Leap status: Normal`.
+
+  Why that shape rather than simply reopening udp/123:
+
+  - **Destination-scoped, not port-scoped.** `-dport 123` alone would readmit
+    the whole pool, which is the chatter this document objects to. One address
+    is one conversation.
+  - **An address, not a name.** Firewall rules cannot follow a pool name whose
+    members rotate. Cloudflare's is anycast and stable. The trade is a value
+    that must be kept in step across two playbooks, which is why both carry the
+    warning.
+  - **Two internal options were tested first and neither answered.** The three
+    district resolvers and the default gateway were all probed on udp/123 from
+    CT `800`, which sits unfiltered on the bridge: no reply from any. Public NTP
+    does work from this network, verified against Cloudflare, Google and the
+    Debian pool, so the district permits outbound NTP -- which was not a given.
+
+  When a designated in-cluster time source exists this rule goes away rather
+  than changing, and the appliance stops needing NTP egress at all. The
+  consequence of getting it wrong is not abstract: TLS certificate validation,
   Guacamole tokens and corosync membership all fail on a wrong clock, and they
   fail in ways that look like anything but a clock.
 - **mDNS drops down the list, not off it.** `avahi-daemon` is not installed,
@@ -924,6 +944,7 @@ So the host gets its own narrow egress, written by
 `-e cyberlab_host_egress=false`:
 
 ```
+OUT ACCEPT -i vmbr0 -dest 162.159.200.1 -p udp -dport 123 -log nolog  # NTP, one upstream
 OUT ACCEPT -i vmbr0 -p udp -dport 53 -log nolog       # DNS
 OUT ACCEPT -i vmbr0 -p tcp -dport 53 -log nolog       # DNS over TCP
 OUT ACCEPT -i vmbr0 -p tcp -dport 80,443 -log nolog   # apt, pveam, git over https
@@ -942,12 +963,9 @@ different interfaces and none of it applies. The inbound lab-subnet `DROP` is
 untouched, guest policy is still enforced at each guest's own tap, and the
 seventeen-row probe passes unchanged with these rules generated.
 
-NTP stays closed. `systemd-timesyncd` is inactive on `pve1`, and the roadmap
-wants one designated cluster time source rather than every node reaching a
-public pool — precisely the chatter this document exists to keep off the school
-network. Note the trap for later: a badly wrong clock breaks TLS, so a
-`git clone` failing on certificate validation is a symptom of no time source,
-not of these rules.
+NTP is open to exactly one address, which is the narrow form of "one designated
+time source" the roadmap asks for — see the chrony note in the measured baseline
+above for how it was chosen and what it replaced.
 
 The cache carve-out is unchanged and separate: the cache reaches upstream
 through its transient `prov0` interface at factory time, never through `svc0`.

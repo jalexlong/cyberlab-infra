@@ -52,6 +52,13 @@
     # Set false for a district that requires a demonstrably silent appliance.
     cyberlab_host_egress: true
 
+    # The one NTP upstream the host may reach, destination-scoped. Must match
+    # cyberlab_ntp_server in host-bootstrap.yml, which points chrony at it --
+    # the two halves are stored in different playbooks and a mismatch leaves the
+    # node running a time daemon that can never reach its server. Empty string
+    # writes no rule at all, for a site that wants no NTP egress whatsoever.
+    cyberlab_ntp_server: 162.159.200.1
+
     # Whether to reconcile per-guest `.fw` files and the `firewall=1` NIC flag.
     # Both halves matter and they are stored separately -- see the guest tasks
     # below for why that separation is the single most dangerous thing here.
@@ -331,20 +338,27 @@
           # inbound lab-subnet DROP above is untouched. Students gain nothing
           # from any of it -- guest policy is enforced at their own tap.
           #
-          # NTP is deliberately absent, and that has a live consequence worth
-          # knowing before you copy this rule set. The roadmap wants one
-          # designated cluster time source rather than every node reaching a
-          # public pool -- exactly the chatter docs/network-isolation.md exists
-          # to suppress. But `chrony` IS installed and enabled on pve1, so
-          # closing udp/123 does not stop it: measured 2026-08-19, it sits at
-          # Reach 0 against six pool servers, Stratum 0, unsynchronised. The
-          # node is therefore neither quiet nor on time.
+          # NTP to exactly one upstream, by address.
           #
-          # Resolve it at the host, not here: either disable chrony and accept
-          # RTC drift until a cluster time source exists, or add udp/123 to ONE
-          # named upstream. A wrong clock breaks TLS validation, Guacamole
-          # tokens and corosync membership, so `git clone` failing on a
-          # certificate error is a symptom of this rather than of the firewall.
+          # This is the narrow form the roadmap asks for -- one designated time
+          # source, not every node reaching a public pool, which is the chatter
+          # docs/network-isolation.md exists to suppress. Destination-scoped
+          # rather than port-scoped for the same reason: `-dport 123` alone
+          # would readmit the pool.
+          #
+          # It exists because closing udp/123 did not stop chrony, it only broke
+          # it. Measured 2026-08-19: enabled, running, Reach 0 against six pool
+          # servers, Stratum 0, unsynchronised since 2026-08-07. Neither quiet
+          # nor on time. host-bootstrap.yml points chrony at this same address
+          # and retires the distribution's pool lines; the two must agree.
+          #
+          # A wrong clock breaks TLS validation, Guacamole tokens and corosync
+          # membership, and each fails in a way that points anywhere but at the
+          # clock. When a designated in-cluster time source exists this rule
+          # goes away rather than changing.
+          {% if cyberlab_ntp_server %}
+          OUT ACCEPT -i {{ uplink_iface }} -dest {{ cyberlab_ntp_server }} -p udp -dport 123 -log nolog # NTP, one upstream
+          {% endif %}
           OUT ACCEPT -i {{ uplink_iface }} -p udp -dport 53 -log nolog # DNS
           OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 53 -log nolog # DNS over TCP
           OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 80,443 -log nolog # apt, pveam, git over https
