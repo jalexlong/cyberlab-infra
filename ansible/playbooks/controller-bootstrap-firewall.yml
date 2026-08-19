@@ -331,14 +331,20 @@
           # inbound lab-subnet DROP above is untouched. Students gain nothing
           # from any of it -- guest policy is enforced at their own tap.
           #
-          # NTP is deliberately absent. `systemd-timesyncd` is inactive on this
-          # node and the roadmap wants one designated cluster time source rather
-          # than every node reaching a public pool, which is exactly the kind of
-          # chatter docs/network-isolation.md exists to keep off the school
-          # network. Add udp/123 here, to one address, if a time source is ever
-          # sited off-box -- and note that a badly wrong clock breaks TLS, so
-          # `git clone` failing with a certificate error is a symptom of this,
-          # not of the firewall.
+          # NTP is deliberately absent, and that has a live consequence worth
+          # knowing before you copy this rule set. The roadmap wants one
+          # designated cluster time source rather than every node reaching a
+          # public pool -- exactly the chatter docs/network-isolation.md exists
+          # to suppress. But `chrony` IS installed and enabled on pve1, so
+          # closing udp/123 does not stop it: measured 2026-08-19, it sits at
+          # Reach 0 against six pool servers, Stratum 0, unsynchronised. The
+          # node is therefore neither quiet nor on time.
+          #
+          # Resolve it at the host, not here: either disable chrony and accept
+          # RTC drift until a cluster time source exists, or add udp/123 to ONE
+          # named upstream. A wrong clock breaks TLS validation, Guacamole
+          # tokens and corosync membership, so `git clone` failing on a
+          # certificate error is a symptom of this rather than of the firewall.
           OUT ACCEPT -i {{ uplink_iface }} -p udp -dport 53 -log nolog # DNS
           OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 53 -log nolog # DNS over TCP
           OUT ACCEPT -i {{ uplink_iface }} -p tcp -dport 80,443 -log nolog # apt, pveam, git over https

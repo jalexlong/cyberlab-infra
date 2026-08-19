@@ -136,8 +136,17 @@ inbound DHCP ordered above it, and — per lab guest — `firewall=1` on the NIC
 a matching `<vmid>.fw` on disk, and permission for its own section subnet and
 no other.
 
+Since 2026-08-18 it also asserts the half of the cache carve-out that lives
+outside the firewall: `cyberlab-cache-routes.service` active, `apt-cacher-ng`
+bound on the svc0 address rather than loopback, and a return route present for
+every section. That was added because permitting the carve-out and the carve-out
+working came apart across a reboot — see `docs/network-isolation.md`.
+
 Tier 2 sends real packets from inside a guest and needs a running lab guest
-with the QEMU guest agent plus a second guest in the same section:
+with the QEMU guest agent plus a second guest in the same section. **Start them
+first** — `950` and `955` carry no `onboot`, so every host reboot leaves them
+stopped, and each needs roughly a minute to take a DHCP lease before the probe
+will work:
 
 ```bash
 ansible-playbook -i inventory.yml playbooks/controller-assert-isolation.yml \
@@ -444,6 +453,45 @@ validation_passed=true
 In that passing run promote's running-VM ping **skipped**, because finalize had
 already stopped the guest. That is the expected path and the reason the
 finalize check is the authoritative one rather than a convenience.
+
+---
+
+### Firewall applied from the repository: 2026-08-18/19, `pve1`
+
+The first run of `controller-bootstrap-firewall.yml` outside check mode, and
+the runs around it. Recorded because three separate things were learned from a
+sequence that was expected to be uneventful.
+
+**The apply itself was uneventful, and that was earned.** Two `--check --diff`
+runs (2026-08-10, 2026-08-18) had established that the generated set differed
+from the hand-placed one only in comments plus one unreferenced alias, and that
+both guests already carried `firewall=1` so no NIC would be touched. It applied
+cleanly and `controller-assert-isolation.yml` passed both tiers afterwards.
+
+**The host had no internet, and the firewall had taken it.** `policy_out: DROP`
+is inherited by the host, and `host.fw` carried no `OUT` rule but DHCP, so from
+2026-08-07 `pve1` could not resolve a name, reach an apt mirror, clone from
+GitHub, or ping `1.1.1.1`. Eleven days, unnoticed, because inbound SSH is
+unaffected and CT `800` sits unfiltered on the bridge. Fixed by uplink-scoped
+host egress rules; verified afterwards that pods still get `blocked` on both
+internet probe rows, so the fix took nothing from lab isolation.
+
+**The package cache broke across two reboots.** First the route unit and
+`apt-cacher-ng` both lost a race with `ifupdown`; then, a day later, the same
+failure recurred because the repair had been applied to the live container only
+in part — the drop-in was written by hand, the route unit merely restarted.
+Running the playbook is what made it stick. Two things generalise:
+
+- **Only tier 2 caught the original failure.** Tier 1 read rule text, the
+  container was `running`, and `systemctl is-active` said `active` while
+  `apt-cacher-ng` served nobody. Tier 1 now checks the binding, so the next
+  occurrence is caught without a live guest.
+- **A `systemctl start` is not a fix.** It restores a service and changes
+  nothing about the next boot.
+
+**Still owed:** the corrected `cyberlab-cache-routes.service` has never booted.
+A deliberate cold boot of `pve1`, followed by a tier 2 run on untouched state,
+is the cheapest open test in the project.
 
 ---
 

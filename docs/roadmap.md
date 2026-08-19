@@ -4,8 +4,11 @@ Planning document for taking this repository from its current state to a
 self-contained, classroom-deployable cyber range appliance.
 
 **Written:** 2026-08-04
-**Last revised:** 2026-08-07 — `snat: false` isolation failure confirmed on
-hardware, recursive DNS found to be a live egress path
+**Last revised:** 2026-08-19 — the firewall is applied from the repository and
+asserted on `pve1`; host egress restored after eleven days dark; the package
+cache's reboot fragility found, fixed, and found again
+**Previously revised:** 2026-08-07 — `snat: false` isolation failure confirmed
+on hardware, recursive DNS found to be a live egress path
 (`docs/network-isolation.md`)
 **Previously revised:** 2026-08-06 — repair posture recorded
 (`docs/repair-posture.md`), cluster build sequence added to Phase 3
@@ -151,14 +154,18 @@ a validation that fails. Worth a CI check in Phase 1.
 
 ### Structural gaps
 
-- **`pve1` runs infrastructure SDN only: the zone `virtnet` and `prov0`.**
-  Everything was removed on 2026-08-05 and `prov0` was restored the same day
-  because the template factory cannot work without it — see the two notes
-  below. `pve2` still has no SDN at all.
-- **There are no classroom networks and no egress control.** Per-section VNets
-  are declared in `data/environments/school-lab.yml` but are not built;
-  `cyberlab_sdn_build_sections` defaults to false. Phase 5 builds them from
-  zero rather than tightening existing behaviour.
+- **`pve1` runs the zone `virtnet` with `prov0`, `svc0` and four section
+  VNets.** Everything was removed on 2026-08-05 and `prov0` restored the same
+  day because the template factory cannot work without it; `svc0` and the
+  section VNets were built on 2026-08-07. `pve2` still has no SDN at all.
+  **`cyberlab_sdn_build_sections` still defaults to false**, so a fresh install
+  builds infrastructure networks only — the section VNets on `pve1` exist
+  because a session asked for them, not because the installer does it.
+- **Classroom networks and egress control both exist now, on `pve1` only.**
+  This bullet used to read "there are none". Section VNets are built and
+  isolation is enforced and asserted from the repository as of 2026-08-18. What
+  remains unproven is reproducibility on a *clean* host, which is Phase 0's exit
+  criterion below and not a gap in the rules themselves.
 - **Phase 0 exit remains unproven.** The fixes are correct by inspection and
   parts of the bootstrap path have now been exercised live (see
   `docs/testing.md`), but the exit criterion itself — two consecutive clean
@@ -1156,6 +1163,28 @@ wants a hand on the cable.
   since that is the claim the district actually depends on and the only form of
   it that a silent bind failure cannot satisfy.
 
+  **It broke a second time, on 2026-08-18, and that is the more useful data
+  point.** The playbook fix was correct but had been applied only in part to the
+  live container: the `apt-cacher-ng` drop-in was installed by hand while the
+  route unit itself was merely restarted, so the next reboot lost it again. Two
+  things are worth keeping from that:
+
+  - **A runtime repair is not a repair.** `systemctl start` restores a service
+    and changes nothing about the next boot. The only durable fix on this
+    platform is running the playbook, which is the argument the whole
+    reproducible-from-recipe design rests on, demonstrated at small scale.
+  - **The fail-closed design worked.** With `Requires=` in place, the second
+    failure left `apt-cacher-ng` plainly *down* rather than silently bound to
+    loopback, and tier 1 of `controller-assert-isolation.yml` named the cause in
+    its failure message. That is exactly the behaviour the drop-in was added
+    for, observed in the wild one day later.
+
+  Repaired properly on 2026-08-19 by running
+  `controller-bootstrap-package-cache.yml`, which wrote the corrected unit. **The
+  corrected unit has not yet survived a reboot**, so this criterion stays open
+  until it does — a deliberate cold boot is the cheapest remaining test in this
+  phase and should lead the next session.
+
 **What this reduces the district ask to.** With the cache seeded and the
 firewall enforcing isolation, the appliance needs exactly one thing from a
 district: **an inbound-reachable IP address.** No egress, no DNS, no NTP, no
@@ -1363,7 +1392,11 @@ produces is:
   bootstrap — enabled for `prov0`'s SNAT, but forwarding is global, not
   per-interface;
 - **no firewall rules anywhere in the repository.** No datacenter firewall
-  config, no VNet rules, nothing.
+  config, no VNet rules, nothing. **Closed 2026-08-18:**
+  `controller-bootstrap-firewall.yml` writes all of it and
+  `controller-assert-isolation.yml` checks it, both applied to `pve1`. The three
+  measured failures below are fixed; they are kept in the present tense of the
+  day they were measured because the evidence is the point.
 
 A host that routes, with an address on every lab subnet and no filter, is a
 router between all of them. So a lab guest can likely reach other sections'
@@ -1397,7 +1430,8 @@ nobody predicted also held:
 
 - **The Proxmox management address is reachable from a lab guest** — ICMP,
   tcp/8006 (the Web UI) and tcp/22. This is the assertion Phase 5 exists to
-  make and it fails today.
+  make and it failed on the day it was measured. **Closed the same day by hand,
+  reproduced from the repository 2026-08-18, and re-asserted 2026-08-19.**
 - **Cross-section isolation does not exist.** A guest in one section reaches
   another section's gateway *and its guests*.
 - **`prov0` is reachable** from a section VNet.
@@ -1501,10 +1535,11 @@ isolation test writes itself.
    caught a fully recursive resolver, with tcp/53 open, reachable from every
    student VM.
 2. No reach to the district LAN, and specifically **not the Proxmox management
-   address**. Measured 2026-08-07: **this fails today** — ICMP, tcp/8006 and
-   tcp/22 all reach the host from a lab guest.
-3. No reach to another pod's or section's subnet. Measured 2026-08-07: **this
-   fails today**, guest-to-guest across sections included.
+   address**. Measured 2026-08-07: ICMP, tcp/8006 and tcp/22 all reached the
+   host from a lab guest. **Now blocked and asserted** — rows 2-4 of the probe.
+3. No reach to another pod's or section's subnet. Measured 2026-08-07: broken,
+   guest-to-guest across sections included. **Now blocked and asserted** — six
+   probe rows, gateway and guest for each other section.
 4. Reaches the cache on `3142` and **nothing else on that host** — the
    carve-out is a host *and port*, not a host. Testing only that the cache
    works would pass a container with SSH exposed to every student in the
@@ -1648,10 +1683,22 @@ is the state that session left behind, then what is next.
    skipped both guests, confirming they still hold `firewall=1`, so an apply
    writes files only and disturbs no lease.
 
-   **Still owed: actually applying it.**
-   `controller-bootstrap-firewall.yml` has not been run outside check mode, so
-   `pve1` still runs the hand-placed set. Given the diff, this is now a low-risk
-   step rather than an unknown one
+   **Applied to `pve1` on 2026-08-18 — item 4 is closed.** All four `.fw`
+   files are now written by `controller-bootstrap-firewall.yml` and carry its
+   `Managed by` header. Re-verified 2026-08-19: both tiers pass, tier 2
+   reproducing all seventeen rows from guest `950`. The hand-placed era is over;
+   the repository is the source of truth for what `pve1` enforces.
+
+   **The apply also restored host egress, which had been dead for eleven days.**
+   Enabling the datacenter firewall on 2026-08-07 brought `policy_out: DROP`
+   with it, the host inherits that, and `host.fw` had no `OUT` rule but DHCP —
+   so `pve1` itself could not resolve a name, reach an apt mirror, clone from
+   GitHub, or ping `1.1.1.1`. See the egress note in the student-network section
+   and the corrected rule set in `docs/network-isolation.md`. Confirmed working
+   after the apply: DNS resolves, `github.com` and `deb.debian.org` both answer
+   `200`, `1.1.1.1` pings. **Lab isolation is unchanged by it** — the same probe
+   run that confirmed egress also returned `blocked` on both internet rows from
+   inside a pod
 
    **Blocking discovery, 2026-08-18: CT `800`'s checkout is four commits stale**
    — at `84c0d1b`, which *predates every firewall playbook in this item*. So
@@ -1673,28 +1720,35 @@ is the state that session left behind, then what is next.
    anything. The controller pins an older collection and is unaffected, which is
    why this stayed hidden. Replace it with `result_format=yaml` under
    `[defaults]`, which is the supported spelling and needs no collection
-5. **Bake the cache client config into the template images.** The proxy line
+5. **Cold-boot `pve1` and re-run the assertions.** The cheapest open test in
+   the project, and the only one that closes the restated Phase 2.5 reboot
+   criterion. The cache has now failed across two reboots and been fixed
+   properly once; the corrected `cyberlab-cache-routes.service` has never
+   actually booted. Start `950`/`955` afterwards and run
+   `controller-assert-isolation.yml` with tier 2 — a clean seventeen rows on a
+   host nobody touched by hand is a materially stronger claim than any run so
+   far. Expect to also confirm that the repo-written firewall and the host
+   egress rules come back on their own
+6. **Bake the cache client config into the template images.** The proxy line
    *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
    `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
    needs hand-configuring and the cache warms only by accident. This is what
    makes the Phase 2.5 seeding claim true for real images rather than for one
    hand-edited test guest
-6. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
+7. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
    Now doubles as the proof that **both** the cache and the firewall are
    reproducible from the installer rather than hand-built artifacts that happen
-   to exist. As of item 4 the installer *does* write firewall config under
-   `--with-firewall`, so this run is what turns that from written code into a
-   verified claim. Run it against `pve1`'s existing hand-placed rules first:
-   `controller-assert-isolation.yml` alone is read-only, and a clean pass there
-   proves the assertions agree with the state that was actually measured before
-   anything gets rewritten
-7. **Pull the cable.** The one Phase 2.5 exit criterion still owed. Stripping
+   to exist. **Fast-forward CT `800` first** — see the blocking discovery under
+   item 4; as of 2026-08-19 it still sits at `84c0d1b`, so the installer path
+   cannot run the firewall playbooks at all, and a wiped-host run would prove
+   the reproducibility of a checkout that does not contain them
+8. **Pull the cable.** The one Phase 2.5 exit criterion still owed. Stripping
    the cache's own egress interface is strictly weaker, and the roadmap was
    right to insist on the physical test
-8. **Measure per-VM and per-LXC RAM on the R730** (Phase 3). No longer
+9. **Measure per-VM and per-LXC RAM on the R730** (Phase 3). No longer
    hardware-gated — see the note under Constraints. Right-size `slots.yml` from
    the result and settle the pod-shape question the RAM budget section raises
-9. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
+10. Price a 3-node and 4-node cluster; verify the refurb supply is repeatable
    enough to publish as a BOM — **no longer blocked** on the student-network
    question, which resolved to Model A for the pilot. Fold in the cache's
    per-node disk (20 GB provisioned, 24 MB used after one template's worth of
@@ -1705,33 +1759,40 @@ The district-sysadmin conversation is no longer an immediate action. It
 belongs to the prebuilt SKU (Phase 7) and its question list is parked in the
 student-network section until there is a district to ask.
 
-### Host state left behind on `pve1`, 2026-08-07
+### Host state left behind on `pve1`, current as of 2026-08-19
 
-Recorded because the next session starts here, not from a clean host:
+Recorded because the next session starts here, not from a clean host. Dates
+below name when each fact was established, not when it was written.
 
 - **Datacenter firewall is ENABLED** with per-guest default-deny.
   `proxmox-firewall` is stopped, disabled and **masked**; unmask it before any
   future nftables attempt.
-- **Firewall rules were placed by hand**, not by any playbook. They live in
+- **Firewall rules are written by the repository as of 2026-08-18.**
+  `controller-bootstrap-firewall.yml` was applied and all four files —
   `/etc/pve/firewall/cluster.fw`, `/etc/pve/nodes/pve1/host.fw`, and per-guest
-  `950.fw`/`955.fw`. Since 2026-08-10 the repository *can* write them —
-  `controller-bootstrap-firewall.yml` — but has not: the host still runs the
-  hand-placed set. The two **have** been diffed on hardware, on 2026-08-10 and
-  again on 2026-08-18 after a host reboot; both runs agree that the generated
-  set differs from the running one only by comment text and one unreferenced
-  `svcnet` alias. See item 4 under Immediate next actions.
+  `950.fw`/`955.fw` — now carry its `Managed by ... Do not edit by hand` header.
+  The hand-placed set is gone. Two diffs preceded the apply (2026-08-10 and
+  2026-08-18) and both showed rule-level identity, which is why it was a
+  low-risk step rather than a leap.
+- **The host has its own egress again**, on the uplink interface only: DNS,
+  HTTP/HTTPS, git-over-SSH and ICMP. It had none between 2026-08-07 and
+  2026-08-18 — see the egress note under "Egress and the apt cache". `apt-get
+  update`, `git clone` and `ping` all work from an SSH session on `pve1`.
 - **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
   `t101c213`) plus the new `svc0`. They were absent before this session.
 - **CT `801`** runs the package cache, still dual-homed with its `prov0`
-  seeding NIC attached. **Repaired 2026-08-18** after the reboot left it with no
-  return routes and bound to loopback — see the Phase 2.5 exit note. The repair
-  was applied to the live container by hand as well as to the playbook, so `801`
-  currently carries a `cyberlab-wait-for-net.conf` drop-in that a rebuild would
-  reproduce from the playbook.
+  seeding NIC attached. It broke across **both** recent reboots and is now
+  repaired properly — see the Phase 2.5 exit note for the mechanism. Worth
+  recording why it took two goes: on 2026-08-18 the playbook was corrected and
+  the *drop-in* was hand-installed, but the route unit itself was only restarted
+  rather than rewritten, so the 2026-08-18 reboot lost it again. Running
+  `controller-bootstrap-package-cache.yml` on 2026-08-19 wrote the corrected
+  unit, and the container now holds the real fix rather than a runtime patch.
+  **The fix has not yet survived a reboot** — that is the one thing still
+  outstanding on it.
 - **Tier 2 of the isolation assertions passed all seventeen rows on
-  2026-08-18**, after that repair, from guest `950` with `955` as the
-  same-section control. Guests `950` and `955` were started for that run and
-  left running.
+  2026-08-19**, from guest `950` with `955` as the same-section control, with
+  the repo-written firewall and host egress both in force.
 - **Disposable guests `950` and `955` both sit on `t101c011`** —  `955` was
   moved there for a same-section control test. **Leave them that way:** as
   `scripts/isolation-probe.sh` was actually written, the same-section peer is
@@ -1742,8 +1803,10 @@ Recorded because the next session starts here, not from a clean host:
   needed `955` moved back to `t101c112`; that describes the hand probe of
   2026-08-07, not the committed script, and following it would break tier 2's
   control instead of enabling anything.
-  **Both were stopped as of 2026-08-18** (uptime says the host rebooted on
-  2026-08-17), so tier 2 needs them started first. Destroy them with
+  **They do not survive a reboot** — neither carries `onboot`, and the host has
+  rebooted twice (2026-08-17 and 2026-08-18). Start them before any tier 2 run;
+  each takes about a minute to take a DHCP lease, and `955` reliably lands on
+  `10.101.11.101`. Destroy them with
   `qm stop <id> && qm destroy <id> --purge` — and note that purge also deletes
   their `.fw` files.
 - **Pre-change capture** at `/root/cyberlab-captures/pve1-20260807-081810`;

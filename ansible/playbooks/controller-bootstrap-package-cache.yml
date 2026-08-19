@@ -428,20 +428,42 @@
       delay: 2
       until: "'LISTENING' in (acng_listen.stdout | default(''))"
 
-    # Proving the service answers from the host is not the same as proving it
-    # answers on the network lab guests will use. Query the svc0 address
-    # specifically.
-    - name: Verify the cache answers on its svc0 address from the host
+    # Proving the service is bound is not the same as proving it answers, so
+    # ask it for a page -- but ask from INSIDE the container.
+    #
+    # This curl used to run on the host, and that made the whole playbook fail
+    # on 2026-08-19 against a cache that was working perfectly. Once the
+    # datacenter firewall is enabled the host inherits policy_out DROP, and the
+    # host egress rules in controller-bootstrap-firewall.yml are scoped to the
+    # uplink interface, so the host cannot open a connection out of svc0. The
+    # assertion reported a dead cache while a pod got HTTP 200 from that exact
+    # address. Same mistake as the first draft of the tier-1 check in
+    # controller-assert-isolation.yml: checking a service from a vantage point
+    # that is not the consumer's.
+    #
+    # From inside the container this is firewall-independent and still catches
+    # what it needs to -- a daemon bound to the address but refusing to serve.
+    # Proving the pod-to-cache PATH is tier 2's job, and only tier 2's; it needs
+    # a running lab guest, which this playbook has no business requiring.
+    #
+    # wget, not curl: the Debian container image ships wget and does NOT ship
+    # curl, so the first version of this check failed with an empty result and
+    # an error message about BindAddress -- blaming the service for a missing
+    # binary. Exit status is the assertion; wget returns non-zero for any
+    # non-2xx response as well as for a refused connection.
+    - name: Verify the cache answers on its svc0 address
       ansible.builtin.command:
         argv:
-          - curl
-          - -s
-          - -o
+          - pct
+          - exec
+          - "{{ cyberlab_cache_ctid | string }}"
+          - --
+          - wget
+          - -q
+          - --timeout=5
+          - --tries=1
+          - -O
           - /dev/null
-          - -w
-          - "%{http_code}"
-          - --connect-timeout
-          - "5"
           - "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/acng-report.html"
       register: acng_http
       changed_when: false
@@ -450,15 +472,15 @@
     - name: Require the cache to answer on svc0
       ansible.builtin.assert:
         that:
-          - acng_http.stdout | trim in ['200', '401', '403']
+          - acng_http.rc == 0
         fail_msg: >-
           The cache did not answer on
           http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/
-          (got '{{ acng_http.stdout | default('no response') }}'). The
-          container may be running with the service bound to the wrong
-          address -- check BindAddress in
-          /etc/apt-cacher-ng/zzz-cyberlab.conf inside CT
-          {{ cyberlab_cache_ctid }}.
+          (wget rc={{ acng_http.rc | default('unknown') }}). The container is
+          running with the service bound to the wrong address, or not serving
+          -- check BindAddress in /etc/apt-cacher-ng/zzz-cyberlab.conf inside
+          CT {{ cyberlab_cache_ctid }}, and that
+          cyberlab-cache-routes.service did not fail at boot.
         success_msg: >-
           Cache answering on
           http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}/
