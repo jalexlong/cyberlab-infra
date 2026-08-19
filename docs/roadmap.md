@@ -1192,10 +1192,28 @@ wants a hand on the cable.
     for, observed in the wild one day later.
 
   Repaired properly on 2026-08-19 by running
-  `controller-bootstrap-package-cache.yml`, which wrote the corrected unit. **The
-  corrected unit has not yet survived a reboot**, so this criterion stays open
-  until it does — a deliberate cold boot is the cheapest remaining test in this
-  phase and should lead the next session.
+  `controller-bootstrap-package-cache.yml`, which wrote the corrected unit.
+  **The corrected unit survived a deliberate cold boot on 2026-08-19.** The
+  host was rebooted with nothing touched by hand afterwards, and the container's
+  own journal shows the ordering fix doing exactly the work it was written for:
+
+      18:24:39.013951  Finished networking.service
+      18:24:39.018061  Starting cyberlab-cache-routes.service
+      18:24:39.194157  Finished cyberlab-cache-routes.service
+      18:24:39.198149  Starting apt-cacher-ng.service
+
+  The route unit now starts 4ms *after* `networking.service` finishes, where on
+  2026-08-17 it started 1.3s *before*. No `Nexthop has invalid gateway`, no
+  `Couldn't bind socket`. `apt-cacher-ng` came up bound to `10.31.0.10` rather
+  than loopback alone, all four classroom routes were present, and tier 2 of
+  `controller-assert-isolation.yml` recorded `package cache 10.31.0.10:3142
+  reachable` from guest `950` — the cache proven from the consumer's vantage
+  point, which is the only vantage point that counts.
+
+  What remains open is the *restated* form of the criterion: a lab guest
+  completing a full install through the cache after a cold boot. The path is
+  now demonstrably there; what has not been done is pushing real package
+  volume down it.
 
 **What this reduces the district ask to.** With the cache seeded and the
 firewall enforcing isolation, the appliance needs exactly one thing from a
@@ -1712,35 +1730,51 @@ is the state that session left behind, then what is next.
    run that confirmed egress also returned `blocked` on both internet rows from
    inside a pod
 
-   **Blocking discovery, 2026-08-18: CT `800`'s checkout is four commits stale**
-   — at `84c0d1b`, which *predates every firewall playbook in this item*. So
-   `install-cyberlab.sh --with-firewall`, which runs its playbooks inside the
-   controller (`run_controller_playbook`, via `pct exec`), cannot currently run
-   this work at all; the 08-10 and 08-18 diffs were both taken from a laptop
-   checkout instead. The controller's two uncommitted changes — the `svc0`
-   inventory block and `controller-bootstrap-package-cache.yml`, both left over
-   from the 08-07 session — were verified byte-identical to what is now
-   committed, so the fast-forward loses nothing. **Do this before item 6**, or
-   the wiped-host run proves the reproducibility of a checkout that does not
-   contain the thing being proved.
+   ~~**Blocking discovery, 2026-08-18: CT `800`'s checkout is four commits
+   stale**~~ **— resolved 2026-08-19.** It sat at `84c0d1b`, which *predated
+   every firewall playbook in this item*, so `install-cyberlab.sh
+   --with-firewall` — which runs its playbooks inside the controller
+   (`run_controller_playbook`, via `pct exec`) — could not run this work at all;
+   the 08-10 and 08-18 diffs were both taken from a laptop checkout instead.
+   Fast-forwarded to `e6c67ef`, and tier 1 of `controller-assert-isolation.yml`
+   now passes when run from inside CT `800`, which is the path the installer
+   actually uses.
 
-   **Also found: `ansible/ansible.cfg` is not portable off the controller.** It
-   sets the `community.general.yaml` stdout callback, removed in
-   `community.general` 12.0.0, so `ansible-playbook` fails outright on a current
-   collection — the laptop needs
-   `ANSIBLE_STDOUT_CALLBACK=default ANSIBLE_CALLBACK_RESULT_FORMAT=yaml` to run
-   anything. The controller pins an older collection and is unaffected, which is
-   why this stayed hidden. Replace it with `result_format=yaml` under
-   `[defaults]`, which is the supported spelling and needs no collection
-5. **Cold-boot `pve1` and re-run the assertions.** The cheapest open test in
-   the project, and the only one that closes the restated Phase 2.5 reboot
-   criterion. The cache has now failed across two reboots and been fixed
-   properly once; the corrected `cyberlab-cache-routes.service` has never
-   actually booted. Start `950`/`955` afterwards and run
-   `controller-assert-isolation.yml` with tier 2 — a clean seventeen rows on a
-   host nobody touched by hand is a materially stronger claim than any run so
-   far. Expect to also confirm that the repo-written firewall and the host
-   egress rules come back on their own
+   **One correction worth keeping.** The 08-18 note recorded both of the
+   controller's uncommitted changes as byte-identical to what was committed, and
+   treated the stash as a formality. That held for the `svc0` inventory block,
+   which was still identical on 08-19. It did **not** hold for
+   `controller-bootstrap-package-cache.yml`: commits landed after 08-18 that
+   taught the playbook the `networking.service` ordering, the `ExecStartPre`
+   address wait, the `apt-cacher-ng` `Requires=` drop-in, and the
+   inside-the-container `wget` check. The controller's untracked copy had none
+   of them, so discarding it *gained* the boot-race fix rather than losing
+   nothing. A byte-identity check is only true against the commit it was taken
+   against — re-verify it rather than carrying it forward, which is the same
+   claim-outliving-its-measurement pattern this document keeps finding.
+
+   ~~**Also found: `ansible/ansible.cfg` is not portable off the
+   controller.**~~ **— fixed since; confirmed 2026-08-19.** It had set the
+   `community.general.yaml` stdout callback, removed in `community.general`
+   12.0.0, so `ansible-playbook` failed outright on a current collection while
+   the controller's pinned older collection hid it. `ansible.cfg` now carries
+   `stdout_callback = default` with `callback_result_format = yaml`, and a
+   laptop run against `community.general` 13.3.0 needed no environment
+   overrides. Note the ini key is `callback_result_format`, not the
+   `result_format` the documentation names — the file says so in a comment
+5. ~~**Cold-boot `pve1` and re-run the assertions.**~~ **— done 2026-08-19.**
+   `pve1` was rebooted deliberately and came back in about three and a half
+   minutes with nothing touched by hand afterwards. The corrected
+   `cyberlab-cache-routes.service` booted for the first time and worked:
+   `active`, four classroom routes, `apt-cacher-ng` bound to `10.31.0.10`, and a
+   journal showing it ordered 4ms behind `networking.service` rather than 1.3s
+   ahead of it. Host egress and the pinned time source both came back on their
+   own — `github.com` resolved, `1.1.1.1` answered, `chrony` re-selected its one
+   source at Stratum 4, Leap Normal. Guests `950`/`955` were started by hand (no
+   `onboot`), `955` took `10.101.11.101` as documented, and both tiers passed:
+   **seventeen of seventeen rows including the control**, with `package cache
+   10.31.0.10:3142 reachable` from inside guest `950`. The repo-written firewall
+   came back on its own. See `docs/testing.md` for the run record
 6. **Bake the cache client config into the template images.** The proxy line
    *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
    `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
@@ -1750,10 +1784,11 @@ is the state that session left behind, then what is next.
 7. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
    Now doubles as the proof that **both** the cache and the firewall are
    reproducible from the installer rather than hand-built artifacts that happen
-   to exist. **Fast-forward CT `800` first** — see the blocking discovery under
-   item 4; as of 2026-08-19 it still sits at `84c0d1b`, so the installer path
-   cannot run the firewall playbooks at all, and a wiped-host run would prove
-   the reproducibility of a checkout that does not contain them
+   to exist. ~~**Fast-forward CT `800` first**~~ — done 2026-08-19; see the
+   resolved blocking discovery under item 4. The controller is at `e6c67ef`,
+   carries all three firewall/cache playbooks, and passes tier 1 from inside
+   itself, so the installer path can now run this work and a wiped-host run
+   would prove something real
 8. **Pull the cable.** The one Phase 2.5 exit criterion still owed. Stripping
    the cache's own egress interface is strictly weaker, and the roadmap was
    right to insist on the physical test
@@ -1794,12 +1829,17 @@ below name when each fact was established, not when it was written.
 - **The clock is correct again as of 2026-08-19.** `chrony` had been enabled and
   unsynchronised since the firewall went on; it now tracks one upstream, with
   the distribution's `pool` line commented out in `/etc/chrony/chrony.conf` and
-  the replacement in `/etc/chrony/conf.d/cyberlab-timesource.conf`. **Both files
-  were written by hand to match `host-bootstrap.yml` byte for byte**, because
-  that playbook targets `proxmox_hosts` (local connection) and so must run on
-  the node itself, against a checkout that is currently 13 commits behind. A
-  later run should report no change on those tasks; if it reports a change, the
-  hand edit and the playbook have drifted and the playbook wins.
+  the replacement in `/etc/chrony/conf.d/cyberlab-timesource.conf`. Both files
+  were originally written by hand to match `host-bootstrap.yml` byte for byte,
+  because that playbook targets `proxmox_hosts` (local connection) and so must
+  run on the node itself, against a checkout that was then 13 commits behind.
+  **That caveat is retired as of 2026-08-19:** the host checkout was brought to
+  `e6c67ef` and `host-bootstrap.yml` was run on the node, where *Point chrony at
+  the single designated time source* and *Retire the distribution pool
+  directives* both reported `ok`, not `changed`. The hand edit and the playbook
+  agree; the files are now playbook-backed rather than hand-held. The run's
+  `changed=2` came entirely from the `pveum` role and ACL reconciles, which is
+  this playbook's documented steady state and not drift.
 - **Four section VNets exist** (`t101c011`, `t101c112`, `t101c123`,
   `t101c213`) plus the new `svc0`. They were absent before this session.
 - **CT `801`** runs the package cache, still dual-homed with its `prov0`
@@ -1810,8 +1850,11 @@ below name when each fact was established, not when it was written.
   rather than rewritten, so the 2026-08-18 reboot lost it again. Running
   `controller-bootstrap-package-cache.yml` on 2026-08-19 wrote the corrected
   unit, and the container now holds the real fix rather than a runtime patch.
-  **The fix has not yet survived a reboot** — that is the one thing still
-  outstanding on it.
+  **The fix survived a cold boot on 2026-08-19** — route unit `active`, all four
+  classroom routes present, `apt-cacher-ng` bound to `10.31.0.10` rather than
+  loopback alone, with the journal showing the route unit starting after
+  `networking.service` instead of racing it. See the Phase 2.5 exit note for the
+  timings.
 - **Tier 2 of the isolation assertions passed all seventeen rows on
   2026-08-19**, from guest `950` with `955` as the same-section control, with
   the repo-written firewall and host egress both in force.
@@ -1826,7 +1869,8 @@ below name when each fact was established, not when it was written.
   2026-08-07, not the committed script, and following it would break tier 2's
   control instead of enabling anything.
   **They do not survive a reboot** — neither carries `onboot`, and the host has
-  rebooted twice (2026-08-17 and 2026-08-18). Start them before any tier 2 run;
+  now rebooted three times (2026-08-17, 2026-08-18 and 2026-08-19). Start them
+  before any tier 2 run;
   each takes about a minute to take a DHCP lease, and `955` reliably lands on
   `10.101.11.101`. Destroy them with
   `qm stop <id> && qm destroy <id> --purge` — and note that purge also deletes

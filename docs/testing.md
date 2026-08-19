@@ -489,9 +489,69 @@ Running the playbook is what made it stick. Two things generalise:
 - **A `systemctl start` is not a fix.** It restores a service and changes
   nothing about the next boot.
 
-**Still owed:** the corrected `cyberlab-cache-routes.service` has never booted.
-A deliberate cold boot of `pve1`, followed by a tier 2 run on untouched state,
-is the cheapest open test in the project.
+~~**Still owed:** the corrected `cyberlab-cache-routes.service` has never
+booted.~~ **Settled 2026-08-19 — see the cold boot below.**
+
+---
+
+### Cold boot on untouched state: 2026-08-19, `pve1`
+
+The test the two previous entries kept deferring. `pve1` was rebooted
+deliberately at 13:21 CDT and answered again about three and a half minutes
+later. **Nothing was touched by hand after the reboot** before the checks ran,
+which is the whole point of the run — every previous green result on this host
+followed a session that had just finished adjusting it.
+
+Checked in the handoff's order, cache first because it was the least proven:
+
+| Check | Expected | Observed |
+| --- | --- | --- |
+| `cyberlab-cache-routes.service` | `active` | `active` |
+| classroom routes in CT `801` | 4 | 4 |
+| `apt-cacher-ng` bind | `10.31.0.10:3142` | `10.31.0.10`, `10.30.0.20`, `127.0.0.1` |
+| host name resolution | resolves | `github.com` → `140.82.114.3` |
+| host ICMP egress | replies | `1.1.1.1`, 0% loss, ~13ms |
+| `chrony` | one source, Stratum 4 | `time.cloudflare.com`, Stratum 4, Leap Normal |
+| isolation tier 1 | PASS | PASS |
+| isolation tier 2 | 17/17 incl. control | 17/17 incl. control |
+
+**The route unit booted correctly for the first time**, and the container's
+journal shows precisely why (stamps are UTC; 18:24 UTC is the 13:24 CDT boot):
+
+    18:24:39.013951  Finished networking.service
+    18:24:39.018061  Starting cyberlab-cache-routes.service
+    18:24:39.194157  Finished cyberlab-cache-routes.service
+    18:24:39.198149  Starting apt-cacher-ng.service
+
+Against the 2026-08-17 failure, where the unit started 1.3s *before*
+`networking.service` finished and `ip` reported `Nexthop has invalid gateway`,
+it now starts 4ms *after* it finishes. `apt-cacher-ng` is ordered behind the
+routes and bound its `svc0` address rather than falling back to loopback, so
+neither of the two 08-17 casualties recurred. `After=network-online.target`
+alone was the bug; ordering on the unit that actually configures the interface
+is the fix, and this is the first evidence of it under real boot conditions.
+
+**Tier 2 recorded `package cache 10.31.0.10:3142 reachable` from inside guest
+`950`** — the cache proven from the consumer's vantage point after a cold boot,
+not from the host, which cannot open that connection at all once `policy_out:
+DROP` applies.
+
+Guests `950`/`955` were started by hand, as expected: neither carries `onboot`.
+`955` took `10.101.11.101` within about 90 seconds, as documented.
+
+**What this run does and does not establish.** It establishes that the firewall,
+the host's egress, the pinned time source and the cache all come back on their
+own, from repository-written configuration, with no operator present. It does
+**not** establish the restated Phase 2.5 criterion, which asks for a lab guest
+completing a full install through the cache after a cold boot. The path is now
+proven; the package volume has not been pushed down it.
+
+**One process note.** The first attempt to wait for the host to return matched
+immediately and reported `up 22 hours` — SSH answered 15 seconds after `systemctl
+reboot` was issued, because the host had not gone down yet. A liveness check that
+only asks "does it answer" cannot distinguish "back" from "not yet gone." The
+second attempt required `/proc/uptime` below a threshold, which is what actually
+proves a fresh boot.
 
 ---
 
