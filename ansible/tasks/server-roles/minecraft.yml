@@ -435,6 +435,25 @@
     state: started
   when: mc_start_gate | default(false) | bool
 
+# Gate writes connect.json ITSELF on first successful registration -- the
+# endpoint token does not have to be fetched from the dashboard when the name is
+# unclaimed -- and it writes it MODE 0644. That file is the endpoint credential:
+# anyone who can read it can impersonate this server on the Connect network. So
+# the permissions are corrected here rather than assumed, on every run, because
+# Gate will recreate the file at 0644 if it is ever regenerated.
+- name: Check whether Gate has written its Connect credential
+  ansible.builtin.stat:
+    path: "{{ mc_root }}/gate/connect.json"
+  register: connect_json_stat
+
+- name: Secure the Connect credential
+  ansible.builtin.file:
+    path: "{{ mc_root }}/gate/connect.json"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0600"
+  when: connect_json_stat.stat.exists
+
 - name: Report what was built
   ansible.builtin.debug:
     msg:
