@@ -31,7 +31,11 @@
 #      the guest ARPs for its gateway the moment it boots.
 #   3. Sweep the host's own subnets to force the table to populate, then reread.
 #      Only reached on a cold first build.
-set -uo pipefail
+# Strict mode, with the three places that legitimately tolerate failure marked
+# explicitly rather than by leaving -e off for the whole script. Note that -e is
+# already suppressed inside `if` conditions and `&&` lists, which is why the
+# strategy functions below can return non-zero as a normal outcome.
+set -Eeuo pipefail
 
 VMID="${1:?usage: discover-guest-ip.sh <vmid> [timeout_seconds]}"
 TIMEOUT="${2:-180}"
@@ -86,9 +90,13 @@ try_neigh() {
 # strategies have already failed, and only across subnets the host itself is
 # on.
 sweep_local_subnets() {
-  local cidr n=0
+  local cidr cidrs n=0
 
-  for cidr in $(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}'); do
+  # Assigned before the loop rather than substituted into the `for` list, so a
+  # failing `ip` is a visible empty string rather than an exit mid-function.
+  cidrs="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}')" || true
+
+  for cidr in $cidrs; do
     # Expand the CIDR with python3 rather than slicing octets in shell. Deriving
     # the range by hand gets the boundary wrong whenever the host sits in the
     # upper half of a /23 -- 10.64.63.5/23 is the same network as
@@ -110,7 +118,13 @@ for host in net.hosts():
 PY
 )" || continue
 
-    [[ -z "$hosts" ]] && continue
+    # if/then rather than `[[ ... ]] && continue`: under `set -e` that AND-list
+    # returns non-zero whenever the test is false, which would exit the script
+    # on exactly the sweeps that should proceed.
+    if [[ -z "$hosts" ]]; then
+      continue
+    fi
+
     log "  sweeping ${cidr} to populate the neighbour table"
 
     local addr
@@ -124,7 +138,9 @@ PY
   done
 }
 
-MAC="$(guest_mac)"
+# `|| true` because an absent guest or an unmatched grep is a case this script
+# reports itself, with a better message than the shell's silent exit.
+MAC="$(guest_mac || true)"
 if [[ -z "$MAC" ]]; then
   log "ERROR: could not read a MAC address from 'qm config $VMID'."
   exit 2
