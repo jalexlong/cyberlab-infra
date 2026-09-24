@@ -422,6 +422,75 @@ Three to five mini/SFF nodes, local NVMe on each, no shared storage.
   for a classroom lab, and HA on refurb hardware is a support burden with no
   educational payoff.
 
+#### `pve1` and `pve2` are not clustered — decided: two service domains
+
+Reconsidered 2026-09-24 and left unchanged. Recorded here because the duplicate
+Debian 13 template on `pve2` makes clustering look like the obvious
+simplification, and it is not.
+
+**Clustering and segregation are orthogonal, so segregation is not the
+argument.** A Proxmox cluster is a management-plane decision — replicated
+`/etc/pve`, one UI, one ACL model, migration. It would not merge the networks or
+weaken guest isolation. Rejecting it *to protect segregation* would be rejecting
+it for a reason that does not apply.
+
+**The argument that actually settles it is that clustering would not fix the
+thing that prompted the question.** The cluster build sequence below already
+concluded that with no shared storage a guest lives on one node, so a template
+needs **a distinct VMID per node** — the same shape as the package cache
+reserving `801-805`. `pve2`'s template at VMID `900` is exactly that shape.
+A cluster collapses the duplicate *build*, not the duplicate *catalog entry*.
+
+And between these two nodes even the build would not collapse. `pve1` builds
+five lab images over `prov0`, at static bootstrap addresses, with the key read
+from controller CT `800`. `pve2` builds one image on the flat district LAN, at
+a DHCP address discovered through the host's neighbour table, with a key from a
+file on the node. That is not one build with two destinations; it is two builds.
+Building each node from the same catalog entry is also reproducible from
+upstream and independently verifiable, where copying a promoted template between
+nodes drifts and cannot be re-derived.
+
+**What joining would cost today, measured 2026-09-24:**
+
+- `pvecm add` **refuses a node that already holds guests**, and joining replaces
+  `/etc/pve`. `pve2` holds VM `500` — `www.farmcardscode.org`, live and
+  answering HTTP 200 — plus the new template. Joining means back up, join,
+  restore, against a running public service.
+- **A two-node cluster has no quorum.** Lose one and the survivor's `/etc/pve`
+  goes read-only: no starting guests, no editing config. It needs a QDevice to
+  be sane, and there is not one yet.
+- **Corosync wants a quiet, low-latency link.** Both nodes share one 1 GbE
+  switch that will also carry nightly PBS traffic. Corosync starvation during a
+  backup window is a well-worn cause of false failover.
+
+**The real distinction is service domain, not physical hardware:**
+
+| | `pve1` | `pve2` |
+|---|---|---|
+| Purpose | Cyberlab | School services |
+| Threat model | Students attacking things by design | Public-facing production |
+| Uptime | Best-effort, rebuildable | Website and Minecraft are live |
+| Change cadence | Constant experimentation | Conservative |
+| Future | 3-5 node lab cluster, this phase | Grows with services hardware |
+
+The cluster this section plans is **`pve1` plus lab nodes**. `pve2` belongs to
+the other domain and, if it ever clusters, should cluster with future services
+hardware. Two domains, each possibly clustered internally, never crossed.
+
+**What this gives up, honestly:** `/etc/pve` firewall replication. `pve1`'s
+rules are repo-written and asserted; `pve2` has no firewall at all, and a
+cluster would let `controller-bootstrap-firewall.yml` reach it. That cost is
+largely paid by the OPNsense and VLAN work planned for the services domain — an
+external boundary, which is the right shape where nobody is being taught to
+attack firewalls. See the isolation-enforcement decision in Phase 5 for why the
+opposite is true on `pve1`.
+
+**Revisit when** a second services machine arrives — cluster it with `pve2`,
+bare, before putting anything on it; when Phase 3 lab nodes arrive — cluster
+them bare *first*, per the sequence below; or if a two-node cluster ever becomes
+desirable anyway, the Protectli appliance is a natural `corosync-qnetd` QDevice
+host and removes the quorum objection cheaply.
+
 ### RAM budget — this drives the BOM
 
 Full VMs, lean sizing, roughly 6 GB per 3-VM pod:
