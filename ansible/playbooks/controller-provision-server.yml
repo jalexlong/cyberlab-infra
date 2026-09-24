@@ -43,13 +43,29 @@
           {{ servers | map(attribute='id') | list }}
       tags: [always]
 
-    - name: Find matching server definitions
+    # Prefer an id match over a name match rather than concatenating the two,
+    # which is the same shape controller-build-template-pipeline.yml uses.
+    # Concatenating double-counts any entry whose id and name are equal -- and
+    # mc-gate is exactly that -- so a valid catalog looked like an ambiguous one.
+    - name: Find matching server definitions by id
+      ansible.builtin.set_fact:
+        server_matches_by_id: >-
+          {{ servers | selectattr('id', 'equalto', server_name) | list }}
+      tags: [always]
+
+    - name: Find matching server definitions by name
+      ansible.builtin.set_fact:
+        server_matches_by_name: >-
+          {{ servers | selectattr('name', 'equalto', server_name) | list }}
+      tags: [always]
+
+    - name: Prefer id match over name match
       ansible.builtin.set_fact:
         server_matches: >-
           {{
-            servers | selectattr('id', 'equalto', server_name) | list
-            +
-            (servers | selectattr('name', 'equalto', server_name) | list)
+            server_matches_by_id
+            if (server_matches_by_id | length > 0)
+            else server_matches_by_name
           }}
       tags: [always]
 

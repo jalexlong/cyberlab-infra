@@ -162,14 +162,24 @@
       {% endfor %}
 
         status:
+          # Colour codes are the section sign, not `&`. Gate takes § directly;
+          # an `&` renders literally as the two characters.
           motd: |
-            &bSchool Minecraft
-            &7Whitelisted players only
-          showMaxPlayers: 64
+            §bSchool Minecraft
+            §7Whitelisted players only
+          showMaxPlayers: {{ mc.show_max_players | default(64) }}
 
       connect:
         enabled: true
         name: {{ mc.connect_endpoint }}
+
+        # Set explicitly, and false. Gate's own shipped sample sets this TRUE,
+        # so inheriting the default is not safe here: offline-mode players are
+        # unauthenticated, which would let anyone claim any username and make
+        # the backends' whitelists meaningless. The entire identity design of
+        # this server -- Gate authenticates with Mojang and signs what it
+        # forwards -- depends on this staying false.
+        allowOfflineModePlayers: false
   notify: Restart Gate
 
 # ---------------------------------------------------------------------------
