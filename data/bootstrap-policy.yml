@@ -66,6 +66,17 @@ vmid_policy:
         - "Templates in this range may be consumed by deployment automation only after validation."
         - "Template metadata lives in ansible/vars/templates.yml."
         - "Each template should have a stable short id such as debian13, ubuntu2604, parrot, win7, or metasploitable2."
+        - >-
+          The assignments above are per node, not global. VMIDs are unique
+          within a cluster, and pve1 and pve2 are separate standalone nodes with
+          no corosync between them, so the same ID may name a different template
+          on each. This is the same reasoning the package cache uses for 801-805.
+        - >-
+          The assignments above describe pve1, which runs the cyberlab. pve2
+          carries ONLY debian13, at the same 900/950 pair, because it hosts
+          student and school project servers rather than lab images. Nothing
+          else in this range will ever be built there, so there is nothing for
+          it to collide with.
 
     validation_clones:
       start: 950

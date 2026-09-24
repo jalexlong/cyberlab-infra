@@ -7,7 +7,10 @@
     - ../vars/templates.yml
 
   vars:
-    finalize_ssh_private_key: /root/.ssh/id_ed25519_controller
+    # Default only. The key lives on the NODE, because finalize SSHes from the
+    # node into the guest, so its path is per-node and a catalog entry may
+    # override it. pve1 has the controller key; pve2 has its own `id_rsa`.
+    finalize_ssh_private_key_default: /root/.ssh/id_ed25519_controller
     finalize_ssh_user: cyberlab
     finalize_probe_subnet: 10.30.0
 
@@ -56,6 +59,36 @@
           - template_def is defined
           - template_def.vmid is defined
         fail_msg: "Template definition for {{ selected_template_name }} was not found."
+
+    # See the note in controller-prepare-template-vm.yml: `target_node` gates
+    # which node the play does anything on. Every stage needs the same gate, or
+    # a later stage reaches for a VM that only the first stage's node has.
+    - name: End play on nodes this template does not target
+      ansible.builtin.meta: end_host
+      when: template_def.target_node != inventory_hostname
+
+    - name: Resolve the finalize SSH private key for this node
+      ansible.builtin.set_fact:
+        finalize_ssh_private_key: >-
+          {{ template_def.finalize_ssh_private_key | default(finalize_ssh_private_key_default) }}
+
+    # Fail here, with the path in hand, rather than four tasks later as an
+    # opaque SSH timeout against a guest that is actually healthy.
+    - name: Require the finalize SSH private key to exist on this node
+      ansible.builtin.stat:
+        path: "{{ finalize_ssh_private_key }}"
+      register: finalize_key_stat
+
+    - name: Assert the finalize SSH private key is present
+      ansible.builtin.assert:
+        that:
+          - finalize_key_stat.stat.exists
+        fail_msg: >-
+          No SSH private key at {{ finalize_ssh_private_key }} on
+          {{ inventory_hostname }}. Finalize connects from the node to the
+          guest, so the key must exist on the node and its PUBLIC half must be
+          the one baked in by the prepare stage
+          ({{ template_def.ssh_pubkey_path | default('the controller CT key') }}).
 
     - name: Assert template VMID is in template range
       ansible.builtin.assert:
@@ -114,9 +147,53 @@
       ansible.builtin.pause:
         seconds: 45
 
-    - name: Set guest IP fact from template bootstrap IP
+    # Two addressing worlds, and the catalog entry picks which one applies.
+    #
+    # pve1 builds over `prov0` at a static `bootstrap_ip`, so the address is
+    # known before the guest boots. pve2 has no SDN and builds on the flat
+    # district LAN, where DHCP decides. `ansible.builtin.script` is used rather
+    # than a `command` against a checked-out path because pve2 has no clone of
+    # this repository -- the script is shipped to the node for the run.
+    - name: Discover the guest IPv4 address when the template has no bootstrap IP
+      ansible.builtin.script:
+        cmd: "../../scripts/discover-guest-ip.sh {{ template_def.vmid }} 240"
+      register: guest_ip_discovery
+      changed_when: false
+      when: template_def.bootstrap_ip is not defined
+
+    # Take the LAST line, not the whole of stdout. discover-guest-ip.sh logs its
+    # progress to stderr and prints only the address to stdout, but
+    # ansible.builtin.script merges the two streams, so stdout arrives with the
+    # log lines in front of the answer.
+    - name: Set guest IP fact
       ansible.builtin.set_fact:
-        template_guest_ip: "{{ template_def.bootstrap_ip }}"
+        template_guest_ip: >-
+          {{
+            template_def.bootstrap_ip
+            if template_def.bootstrap_ip is defined
+            else (guest_ip_discovery.stdout_lines | default([]) | last | trim)
+          }}
+
+    # Discovery returning junk is far worse than discovery failing: an empty or
+    # malformed value turns every later SSH task into a connection to a
+    # nonsensical host, and the first real error is a timeout that says nothing
+    # about where the bad address came from.
+    - name: Require a usable guest IPv4 address
+      ansible.builtin.assert:
+        that:
+          - template_guest_ip | length > 0
+          - template_guest_ip is match('^\\d{1,3}(\\.\\d{1,3}){3}$')
+        fail_msg: >-
+          Could not determine an IPv4 address for template
+          '{{ template_def.name }}' (VMID {{ template_def.vmid }}) on
+          {{ inventory_hostname }}. Got '{{ template_guest_ip }}'.
+          {{
+            "The catalog defines bootstrap_ip, so this is a catalog error."
+            if template_def.bootstrap_ip is defined
+            else "The guest is DHCP-addressed and discovery found nothing --
+                  check that it booted and that DHCP answered it."
+          }}
+        success_msg: "Template guest is at {{ template_guest_ip }}."
 
     - name: Wait for SSH port
       ansible.builtin.wait_for:

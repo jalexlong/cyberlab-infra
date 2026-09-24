@@ -1,0 +1,151 @@
+---
+# Server role: generic nginx web server, optionally published through a
+# Cloudflare tunnel.
+#
+# This role exists to prove the server catalog is genuinely multi-role rather
+# than a Minecraft installer wearing a catalog as a disguise. It is intentionally
+# small: nginx, a document root, and an outbound tunnel if one is configured.
+#
+# It does NOT describe the live www.farmcardscode.org, which is a hand-built VM
+# on pve2 running a Flask app under gunicorn. Provisioning this role builds a
+# separate, new VM. Adopting the running site would mean rebuilding it, which is
+# not worth doing to a working public service.
+
+- name: Define role variables
+  ansible.builtin.set_fact:
+    web: "{{ server_def.role_vars | default({}) }}"
+    web_root: /var/www/html
+
+- name: Install nginx
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure the document root exists
+  ansible.builtin.file:
+    path: "{{ web_root }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Write the nginx site
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/default
+    mode: "0644"
+    content: |
+      # Managed by ansible/tasks/server-roles/web.yml.
+      #
+      # Listens on loopback and the local network only. Publication is the
+      # tunnel's job, dialed outbound -- consistent with the project's rule that
+      # nothing on the school side accepts an inbound connection from the
+      # internet.
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+
+          root {{ web_root }};
+          index index.html index.htm;
+
+          server_name {{ web.server_name | default('_') }};
+
+          # Do not advertise the nginx version to anyone probing the host.
+          server_tokens off;
+
+          location / {
+              try_files $uri $uri/ =404;
+          }
+
+          location = /healthz {
+              access_log off;
+              add_header Content-Type text/plain;
+              return 200 'ok';
+          }
+      }
+  notify: Reload nginx
+
+- name: Seed a placeholder index page
+  ansible.builtin.copy:
+    dest: "{{ web_root }}/index.html"
+    owner: www-data
+    group: www-data
+    mode: "0644"
+    force: false
+    content: |
+      <!doctype html>
+      <meta charset="utf-8">
+      <title>{{ server_def.name }}</title>
+      <h1>{{ server_def.name }}</h1>
+      <p>Provisioned by cyberlab-infra. Replace this page with real content.</p>
+
+- name: Enable and start nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# Cloudflare tunnel, optional.
+# ---------------------------------------------------------------------------
+- name: Install cloudflared
+  when: web.cloudflared_enabled | default(false) | bool
+  block:
+    - name: Add the Cloudflare package signing key
+      ansible.builtin.get_url:
+        url: https://pkg.cloudflare.com/cloudflare-main.gpg
+        dest: /usr/share/keyrings/cloudflare-main.gpg
+        mode: "0644"
+
+    - name: Add the Cloudflare apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg]
+          https://pkg.cloudflare.com/cloudflared any main
+        filename: cloudflared
+        state: present
+
+    - name: Install the cloudflared package
+      ansible.builtin.apt:
+        name: cloudflared
+        state: present
+        update_cache: true
+
+    # Enrolling needs a token, which is a credential and is not stored in this
+    # repository. Without one the package is installed and left unconfigured
+    # rather than half-enrolled.
+    - name: Report that a tunnel token is still required
+      ansible.builtin.debug:
+        msg: >-
+          cloudflared is installed but NOT enrolled: role_vars.cloudflared_token
+          is empty. Enroll it out of band with
+          `cloudflared service install <token>`, which writes the credential to
+          the host rather than to this repository.
+      when: (web.cloudflared_token | default('')) | length == 0
+
+    - name: Enrol the tunnel
+      ansible.builtin.command:
+        argv:
+          - cloudflared
+          - service
+          - install
+          - "{{ web.cloudflared_token }}"
+      args:
+        creates: /etc/systemd/system/cloudflared.service
+      when: (web.cloudflared_token | default('')) | length > 0
+      no_log: true
+
+- name: Report what was built
+  ansible.builtin.debug:
+    msg:
+      - "nginx serving {{ web_root }} on port 80 (local network only)"
+      - >-
+        cloudflared:
+        {{ 'enrolled' if (web.cloudflared_enabled | default(false) | bool)
+                       and ((web.cloudflared_token | default('')) | length > 0)
+           else ('installed, not enrolled' if (web.cloudflared_enabled | default(false) | bool)
+                 else 'not installed') }}

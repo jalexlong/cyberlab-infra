@@ -61,6 +61,13 @@
       ansible.builtin.set_fact:
         template_def: "{{ template_matches[0] }}"
 
+    # See controller-prepare-template-vm.yml. Without this, validation would
+    # look for the template on a node that never built one and report a missing
+    # template as a validation failure rather than as the wrong question.
+    - name: End play on nodes this template does not target
+      ansible.builtin.meta: end_host
+      when: template_def.target_node != inventory_hostname
+
     - name: Require template is enabled
       ansible.builtin.assert:
         that:

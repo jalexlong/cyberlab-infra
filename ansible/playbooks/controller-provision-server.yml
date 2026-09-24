@@ -1,0 +1,338 @@
+---
+# Provision a running server from a golden template.
+#
+# Usage from controller CT 800, a Proxmox host, or a workstation:
+#   cd ansible
+#   ansible-playbook -i inventory.yml playbooks/controller-provision-server.yml \
+#     -e server_name=mc-gate
+#
+# From a workstation, add the key override the inventory does not know about:
+#   -e ansible_ssh_private_key_file=$HOME/.ssh/claude-key \
+#   -e server_ssh_private_key=$HOME/.ssh/claude-key
+#
+# This is the stage after the template pipeline. The pipeline produces a golden
+# template; this clones one into a specific kind of running server and hands it
+# to a role task file that makes it that kind of server.
+#
+# It is deliberately split into two plays. The first runs on the Proxmox node
+# and does everything that needs `qm`. The second runs against the guest itself,
+# so role task files can use ordinary Ansible modules -- `template`, `copy`,
+# `systemd` -- instead of the SSH heredocs the finalize stage is forced into.
+# Finalize has no choice: it runs while the guest is still being cleaned for
+# imaging. A provisioned server is a normal host and should be treated as one.
+
+- name: Clone and configure the server VM on its Proxmox node
+  hosts: proxmox_targets
+  gather_facts: false
+
+  vars_files:
+    - ../vars/templates.yml
+    - ../vars/servers.yml
+
+  vars:
+    server_ip_discovery_timeout: 240
+
+  tasks:
+    - name: Require a server name
+      ansible.builtin.assert:
+        that:
+          - server_name is defined
+          - server_name | length > 0
+        fail_msg: >-
+          Pass -e server_name=<id>. Available servers:
+          {{ servers | map(attribute='id') | list }}
+      tags: [always]
+
+    - name: Find matching server definitions
+      ansible.builtin.set_fact:
+        server_matches: >-
+          {{
+            servers | selectattr('id', 'equalto', server_name) | list
+            +
+            (servers | selectattr('name', 'equalto', server_name) | list)
+          }}
+      tags: [always]
+
+    - name: Require exactly one matching server definition
+      ansible.builtin.assert:
+        that:
+          - server_matches | length == 1
+        fail_msg: >-
+          Expected exactly one server matching '{{ server_name }}' by id or
+          name, but found {{ server_matches | length }}. Available:
+          {{ servers | map(attribute='id') | list }}
+      tags: [always]
+
+    - name: Select server definition
+      ansible.builtin.set_fact:
+        server_def: "{{ server_matches[0] }}"
+      tags: [always]
+
+    # Same gate as every template stage: the catalog decides which node does the
+    # work, not the inventory. See controller-prepare-template-vm.yml.
+    - name: End play on nodes this server does not target
+      ansible.builtin.meta: end_host
+      when: server_def.target_node != inventory_hostname
+      tags: [always]
+
+    - name: Require server is enabled
+      ansible.builtin.assert:
+        that:
+          - server_def.enabled | default(false) | bool
+        fail_msg: >-
+          Server '{{ server_def.id }}' is present in the catalog but not
+          enabled. Set `enabled: true` in ansible/vars/servers.yml to
+          provision it.
+
+    - name: Assert server VMID is in the server range
+      ansible.builtin.assert:
+        that:
+          - server_def.vmid | int >= 500
+          - server_def.vmid | int <= 599
+        fail_msg: >-
+          Server VMID {{ server_def.vmid }} must be in the 500-599 range.
+          900-949 is golden templates and 950-999 is validation clones;
+          provisioning into either would collide with the template pipeline.
+
+    - name: Resolve the source template definition
+      ansible.builtin.set_fact:
+        source_template: >-
+          {{
+            (templates | selectattr('id', 'equalto', server_def.from_template) | list
+             + templates | selectattr('name', 'equalto', server_def.from_template) | list)
+            | first | default({})
+          }}
+
+    - name: Require the source template exists and is usable
+      ansible.builtin.assert:
+        that:
+          - source_template | length > 0
+          - source_template.enabled | default(false) | bool
+          - source_template.vmid is defined
+        fail_msg: >-
+          Server '{{ server_def.id }}' clones from template
+          '{{ server_def.from_template }}', which is missing or not enabled in
+          ansible/vars/templates.yml.
+
+    # The two nodes are standalone, not clustered. A template on pve1 is simply
+    # not visible to pve2, so this mismatch would surface as "template not
+    # found" on a node that is behaving correctly.
+    - name: Require the template lives on the same node as the server
+      ansible.builtin.assert:
+        that:
+          - source_template.target_node == server_def.target_node
+        fail_msg: >-
+          Server '{{ server_def.id }}' targets {{ server_def.target_node }} but
+          its template '{{ server_def.from_template }}' is built on
+          {{ source_template.target_node }}. pve1 and pve2 are not clustered, so
+          a template cannot be cloned across them. Add a per-node template entry
+          instead.
+
+    - name: Check whether the server VM already exists
+      ansible.builtin.command:
+        argv: [qm, status, "{{ server_def.vmid | string }}"]
+      register: server_status
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether the source template is actually a template
+      ansible.builtin.shell: >
+        qm config {{ source_template.vmid }} | grep -q '^template: 1$'
+      args:
+        executable: /bin/bash
+      register: source_is_template
+      failed_when: false
+      changed_when: false
+      when: server_status.rc != 0
+
+    - name: Require the source template has been promoted
+      ansible.builtin.assert:
+        that:
+          - source_is_template.rc == 0
+        fail_msg: >-
+          VMID {{ source_template.vmid }} on {{ inventory_hostname }} is not a
+          promoted template. Run the template pipeline first:
+          ansible-playbook -i inventory.yml
+          playbooks/controller-build-template-pipeline.yml
+          -e template_name={{ source_template.id }}
+      when: server_status.rc != 0
+
+    - name: Clone the golden template into the server VMID
+      ansible.builtin.command:
+        argv:
+          - qm
+          - clone
+          - "{{ source_template.vmid | string }}"
+          - "{{ server_def.vmid | string }}"
+          - --name
+          - "{{ server_def.name }}"
+          - --full
+          - "{{ 1 if (server_def.full_clone | default(true) | bool) else 0 }}"
+          - --storage
+          - "{{ server_def.disk_storage }}"
+      register: server_clone
+      when: server_status.rc != 0
+      changed_when: server_clone.rc == 0
+
+    - name: Apply the server's resource shape
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ server_def.vmid | string }}"
+          - --cores
+          - "{{ server_def.cores | string }}"
+          - --sockets
+          - "{{ server_def.sockets | default(1) | string }}"
+          - --cpu
+          - "{{ server_def.cpu | default('host') }}"
+          - --memory
+          - "{{ server_def.memory | string }}"
+          - --balloon
+          - "{{ server_def.balloon | default(0) | string }}"
+          - --onboot
+          - "{{ 1 if (server_def.onboot | default(true) | bool) else 0 }}"
+          - --net0
+          - "virtio,bridge={{ server_def.bridge }},firewall=1"
+          - --ipconfig0
+          - "{{ server_def.ipconfig0 | default('ip=dhcp') }}"
+          - --ciuser
+          - "{{ server_def.ci_user }}"
+          - --description
+          - "{{ server_def.description | default('') }}"
+          - --tags
+          - "{{ server_def.tags | default('') }}"
+      changed_when: true
+
+    # `qm disk resize` grows only. Asking for a size the disk already meets or
+    # exceeds is an error, not a no-op, so a plain re-run of this playbook would
+    # fail on an already-provisioned server without this guard.
+    - name: Read the current root disk size
+      ansible.builtin.shell: >
+        qm config {{ server_def.vmid }} | sed -n 's/^scsi0:.*size=\([0-9]\+\)G.*/\1/p'
+      args:
+        executable: /bin/bash
+      register: current_disk_size
+      changed_when: false
+
+    - name: Grow the root disk to the catalog size
+      ansible.builtin.command:
+        argv:
+          - qm
+          - disk
+          - resize
+          - "{{ server_def.vmid | string }}"
+          - scsi0
+          - "{{ server_def.disk_size }}"
+      register: disk_resize
+      changed_when: disk_resize.rc == 0
+      when: >-
+        (current_disk_size.stdout | trim | length > 0)
+        and ((current_disk_size.stdout | trim | int)
+             < (server_def.disk_size | regex_replace('[^0-9]', '') | int))
+
+    - name: Start the server VM
+      ansible.builtin.command:
+        argv: [qm, start, "{{ server_def.vmid | string }}"]
+      register: server_start
+      failed_when: false
+      changed_when: server_start.rc == 0
+
+    - name: Wait for the server VM to be running
+      ansible.builtin.command:
+        argv: [qm, status, "{{ server_def.vmid | string }}"]
+      register: server_running
+      retries: 12
+      delay: 5
+      until: "'status: running' in server_running.stdout"
+      changed_when: false
+
+    - name: Discover the server's IPv4 address
+      ansible.builtin.script:
+        cmd: "../../scripts/discover-guest-ip.sh {{ server_def.vmid }} {{ server_ip_discovery_timeout }}"
+      register: server_ip_discovery
+      changed_when: false
+
+    # Last line only: see the matching note in
+    # controller-finalize-template-vm.yml. ansible.builtin.script merges the
+    # script's stderr progress logging into stdout.
+    - name: Set the server IP fact
+      ansible.builtin.set_fact:
+        server_ip: "{{ server_ip_discovery.stdout_lines | default([]) | last | trim }}"
+
+    - name: Require a usable server IPv4 address
+      ansible.builtin.assert:
+        that:
+          - server_ip | length > 0
+          - server_ip is match('^\\d{1,3}(\\.\\d{1,3}){3}$')
+        fail_msg: >-
+          Could not determine an IPv4 address for server '{{ server_def.id }}'
+          (VMID {{ server_def.vmid }}) on {{ inventory_hostname }}.
+          Got '{{ server_ip }}'.
+        success_msg: "Server {{ server_def.name }} is at {{ server_ip }}."
+
+    # Hand the guest to the second play. The role task files then run against
+    # the server itself rather than shelling into it from the node.
+    - name: Register the provisioned server as an Ansible host
+      ansible.builtin.add_host:
+        name: "{{ server_def.name }}"
+        groups: provisioned_servers
+        ansible_host: "{{ server_ip }}"
+        ansible_user: "{{ server_def.ci_user }}"
+        ansible_ssh_private_key_file: "{{ server_ssh_private_key | default('/root/.ssh/id_ed25519_controller') }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        server_def: "{{ server_def }}"
+        provisioned_on: "{{ inventory_hostname }}"
+      changed_when: false
+
+
+- name: Apply the server role to the provisioned guest
+  hosts: provisioned_servers
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Wait for SSH to answer
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+
+    - name: Show what is being applied
+      ansible.builtin.debug:
+        msg: >-
+          Applying role '{{ server_def.role }}' to {{ inventory_hostname }}
+          ({{ ansible_host }}), provisioned on {{ provisioned_on }}.
+
+    # Roles live as task files rather than as an Ansible roles tree because this
+    # repository has no roles/ directory and every other playbook is flat. A
+    # parallel structure for one feature would be the odd one out.
+    - name: Apply the role task file
+      ansible.builtin.include_tasks: "../tasks/server-roles/{{ server_def.role }}.yml"
+
+  # Handlers have to live at play level: a task file pulled in with
+  # include_tasks can notify a handler but cannot define one.
+  handlers:
+    # Only meaningful once the operator has chosen to start Gate. While it is
+    # enabled-but-stopped, a config change should leave it stopped rather than
+    # quietly publishing the server to the internet as a side effect of a
+    # re-run.
+    - name: Restart Gate
+      ansible.builtin.systemd_service:
+        name: gate
+        state: restarted
+      when: mc_start_gate | default(false) | bool
+
+    # The loop is empty for any role that defines no backends, which is how this
+    # stays harmless for the web role.
+    - name: Restart Paper backends
+      ansible.builtin.systemd_service:
+        name: "paper@{{ item.name }}"
+        state: restarted
+      loop: "{{ server_def.role_vars.backends | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Reload nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded

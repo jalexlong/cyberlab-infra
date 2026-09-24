@@ -1,0 +1,438 @@
+---
+# Server role: Minecraft, as a Gate proxy in front of one or more Paper
+# backends. Included by controller-provision-server.yml and run against the
+# guest itself, so ordinary modules work here.
+#
+# The shape and why it is this shape:
+#
+#   internet --(outbound Minekube Connect tunnel)--> Gate --> Paper (loopback)
+#
+# Nothing on the school side accepts an inbound connection. Gate dials out; the
+# Paper backends bind to 127.0.0.1 and are unreachable from the network at all.
+#
+# Identity is the other half. Gate runs `onlineMode: true`, so it authenticates
+# every player against Mojang, then forwards a SIGNED identity to the backends
+# using Velocity modern forwarding. The backends run `online-mode=false` -- not
+# because authentication is skipped, but because they delegate it to Gate and
+# refuse anything not carrying Gate's signature. Getting this pair wrong in the
+# other direction (backends reachable AND online-mode=false) would let anyone
+# join as any username, which is exactly what makes a whitelist worthless.
+
+- name: Define role variables
+  ansible.builtin.set_fact:
+    mc: "{{ server_def.role_vars }}"
+    mc_root: /opt/minecraft
+    mc_user: minecraft
+    mc_secret_file: /opt/minecraft/forwarding.secret
+
+- name: Require a Connect endpoint name to have been set
+  ansible.builtin.assert:
+    that:
+      - mc.connect_endpoint is defined
+      - mc.connect_endpoint | length > 0
+      - mc.connect_endpoint != 'CHANGE-ME'
+    fail_msg: >-
+      role_vars.connect_endpoint is still 'CHANGE-ME' in
+      ansible/vars/servers.yml. This value is PUBLIC -- it becomes part of the
+      address players type -- so it is deliberately not defaulted. Register an
+      endpoint in the Minekube dashboard and set it here before provisioning.
+
+- name: Install Java and supporting packages
+  ansible.builtin.apt:
+    name:
+      - "{{ mc.java_package }}"
+      - curl
+      - ca-certificates
+      - screen
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# A system user with no login shell and no home-directory login path. Students
+# get access to their own server's files through Pelican or SFTP later, never to
+# this account.
+- name: Create the minecraft service user
+  ansible.builtin.user:
+    name: "{{ mc_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ mc_root }}"
+    create_home: false
+
+- name: Create the directory tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0750"
+  loop:
+    - "{{ mc_root }}"
+    - "{{ mc_root }}/gate"
+    - "{{ mc_root }}/servers"
+
+- name: Create a directory for each backend
+  ansible.builtin.file:
+    path: "{{ mc_root }}/servers/{{ item.name }}"
+    state: directory
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0750"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------------------
+# Velocity forwarding secret
+#
+# Generated once on the host and then reused. Regenerating it on every run
+# would silently break every backend until they were all rewritten together,
+# because Gate and Paper must agree on it exactly.
+# ---------------------------------------------------------------------------
+- name: Check whether the forwarding secret already exists
+  ansible.builtin.stat:
+    path: "{{ mc_secret_file }}"
+  register: secret_stat
+
+- name: Generate the Velocity forwarding secret
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    head -c 32 /dev/urandom | base64 | tr -d '\n=' > {{ mc_secret_file }}
+  args:
+    executable: /bin/bash
+    creates: "{{ mc_secret_file }}"
+  when: not secret_stat.stat.exists
+
+- name: Secure the forwarding secret
+  ansible.builtin.file:
+    path: "{{ mc_secret_file }}"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0600"
+
+- name: Read the forwarding secret
+  ansible.builtin.slurp:
+    src: "{{ mc_secret_file }}"
+  register: secret_raw
+
+- name: Set the forwarding secret fact
+  ansible.builtin.set_fact:
+    forwarding_secret: "{{ secret_raw.content | b64decode | trim }}"
+
+# ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+- name: Download the Gate binary
+  ansible.builtin.get_url:
+    url: "https://github.com/minekube/gate/releases/download/v{{ mc.gate_version }}/gate_{{ mc.gate_version }}_linux_amd64"
+    dest: "{{ mc_root }}/gate/gate"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0755"
+
+- name: Write the Gate configuration
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/gate/config.yml"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml. Edits are
+      # overwritten on the next provisioning run.
+      config:
+        bind: {{ mc.gate_listen | default('0.0.0.0:25565') }}
+
+        # Gate is the only component that talks to Mojang. Turning this off
+        # would make every backend's whitelist meaningless.
+        onlineMode: {{ mc.gate_online_mode | default(true) | bool | lower }}
+
+        forwarding:
+          mode: velocity
+          velocitySecret: "{{ forwarding_secret }}"
+
+        servers:
+      {% for backend in mc.backends %}
+          {{ backend.name }}: 127.0.0.1:{{ backend.port }}
+      {% endfor %}
+
+        try:
+      {% for backend in mc.backends %}
+          - {{ backend.name }}
+      {% endfor %}
+
+        status:
+          motd: |
+            &bSchool Minecraft
+            &7Whitelisted players only
+          showMaxPlayers: 64
+
+      connect:
+        enabled: true
+        name: {{ mc.connect_endpoint }}
+  notify: Restart Gate
+
+# ---------------------------------------------------------------------------
+# Paper backends
+# ---------------------------------------------------------------------------
+# Resolve the build through the API rather than hardcoding a jar URL. The v2
+# API this project's notes referenced is gone -- it returns 410 -- and v3 is
+# the current one. Resolving also yields the SHA-256, so the download is
+# verified rather than trusted.
+- name: Resolve the latest Paper build for the pinned version
+  ansible.builtin.uri:
+    url: "https://fill.papermc.io/v3/projects/paper/versions/{{ mc.paper_version }}/builds/latest"
+    return_content: true
+    headers:
+      User-Agent: "cyberlab-infra/1.0 (ansible provisioning)"
+  register: paper_build
+
+- name: Require the resolved Paper build to be a stable channel
+  ansible.builtin.assert:
+    that:
+      - paper_build.json.channel | upper == 'STABLE'
+    fail_msg: >-
+      Paper {{ mc.paper_version }} resolved to build
+      {{ paper_build.json.id }} on channel
+      '{{ paper_build.json.channel }}', not STABLE. Students should not be
+      playing on an alpha or beta build. Pin a different paper_version in
+      ansible/vars/servers.yml.
+    success_msg: >-
+      Paper {{ mc.paper_version }} build {{ paper_build.json.id }}
+      ({{ paper_build.json.channel }}).
+
+- name: Download the Paper jar for each backend
+  ansible.builtin.get_url:
+    url: "{{ paper_build.json.downloads['server:default'].url }}"
+    dest: "{{ mc_root }}/servers/{{ item.name }}/paper.jar"
+    checksum: "sha256:{{ paper_build.json.downloads['server:default'].checksums.sha256 }}"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart Paper backends
+
+- name: Accept the Minecraft EULA for each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.name }}/eula.txt"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: |
+      # Accepted by automation on behalf of the operator.
+      # https://aka.ms/MinecraftEULA
+      eula=true
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Write server.properties for each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.name }}/server.properties"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      #
+      # server-ip is loopback on purpose: this backend must never be reachable
+      # from the network. Gate is the only thing that connects to it.
+      server-ip=127.0.0.1
+      server-port={{ item.port }}
+
+      # online-mode=false does NOT mean unauthenticated. It means this backend
+      # delegates authentication to Gate and accepts only identities Gate has
+      # signed, via the Velocity forwarding secret. Binding to loopback above is
+      # what makes that safe.
+      online-mode=false
+
+      white-list=true
+      enforce-whitelist=true
+
+      motd=School Minecraft - {{ item.name }}
+      max-players={{ item.max_players | default(20) }}
+      view-distance={{ item.view_distance | default(10) }}
+      simulation-distance={{ item.simulation_distance | default(8) }}
+      spawn-protection=0
+      enable-command-block=false
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart Paper backends
+
+- name: Ensure each backend has a config directory
+  ansible.builtin.file:
+    path: "{{ mc_root }}/servers/{{ item.name }}/config"
+    state: directory
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0750"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Configure Velocity modern forwarding on each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.name }}/config/paper-global.yml"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      proxies:
+        velocity:
+          enabled: true
+          online-mode: true
+          secret: "{{ forwarding_secret }}"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart Paper backends
+
+# Created only if absent. Rewriting it on every run would silently revoke every
+# player added through the console since the last provisioning run.
+- name: Seed an empty whitelist for each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.name }}/whitelist.json"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: "[]\n"
+    force: false
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------------------
+# systemd
+# ---------------------------------------------------------------------------
+- name: Install the Gate unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/gate.service
+    mode: "0644"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      [Unit]
+      Description=Minekube Gate proxy
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ mc_user }}
+      Group={{ mc_user }}
+      WorkingDirectory={{ mc_root }}/gate
+      ExecStart={{ mc_root }}/gate/gate
+      Restart=on-failure
+      RestartSec=10
+
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      NoNewPrivileges=true
+      ReadWritePaths={{ mc_root }}/gate
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart Gate
+
+# A templated unit so adding a student backend is a directory plus a catalog
+# entry, not a new unit file each time.
+- name: Install the templated Paper unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/paper@.service
+    mode: "0644"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      # Instance name is the directory under {{ mc_root }}/servers.
+      [Unit]
+      Description=Paper Minecraft server (%i)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ mc_user }}
+      Group={{ mc_user }}
+      WorkingDirectory={{ mc_root }}/servers/%i
+      ExecStart=/usr/bin/java -Xms{{ '${MEM}' }} -Xmx{{ '${MEM}' }} $JVM_FLAGS -jar paper.jar --nogui
+      EnvironmentFile={{ mc_root }}/servers/%i/jvm.env
+      Restart=on-failure
+      RestartSec=15
+
+      # Minecraft writes world data constantly, so the server directory has to
+      # be writable; everything else stays read-only.
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      NoNewPrivileges=true
+      ReadWritePaths={{ mc_root }}/servers/%i
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart Paper backends
+
+- name: Write the JVM environment for each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.name }}/jvm.env"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      # Aikar's flags, as recommended by the PaperMC API for this version.
+      MEM={{ item.memory }}
+      JVM_FLAGS=-XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:+ParallelRefProcEnabled -XX:+PerfDisableSharedMem -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1HeapRegionSize=8M -XX:G1HeapWastePercent=5 -XX:G1MaxNewSizePercent=40 -XX:G1MixedGCCountTarget=4 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1NewSizePercent=30 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 -XX:MaxGCPauseMillis=200 -XX:MaxTenuringThreshold=1
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Restart Paper backends
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Enable and start each Paper backend
+  ansible.builtin.systemd_service:
+    name: "paper@{{ item.name }}"
+    enabled: true
+    state: started
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------------------
+# Gate starts last and deliberately does NOT start automatically here.
+#
+# Gate holds the Connect tunnel, and the tunnel is what exposes this server to
+# the public internet. Starting it is the moment the server becomes reachable,
+# and the project's own governance says district IT sign-off comes before
+# students are admitted. So provisioning leaves it enabled-but-stopped unless
+# the operator explicitly asks otherwise.
+# ---------------------------------------------------------------------------
+- name: Enable Gate without starting it
+  ansible.builtin.systemd_service:
+    name: gate
+    enabled: true
+  when: not (mc_start_gate | default(false) | bool)
+
+- name: Enable and start Gate
+  ansible.builtin.systemd_service:
+    name: gate
+    enabled: true
+    state: started
+  when: mc_start_gate | default(false) | bool
+
+- name: Report what was built
+  ansible.builtin.debug:
+    msg:
+      - "Paper {{ mc.paper_version }} build {{ paper_build.json.id }} on Java from {{ mc.java_package }}"
+      - "Backends: {{ mc.backends | map(attribute='name') | list }}"
+      - "Gate {{ mc.gate_version }} is ENABLED but {{ 'RUNNING' if (mc_start_gate | default(false) | bool) else 'STOPPED' }}."
+      - >-
+        {{ 'Tunnel is live.' if (mc_start_gate | default(false) | bool)
+           else 'Start it with: systemctl start gate  (this publishes the server to the internet)' }}
+      - "Connect endpoint: {{ mc.connect_endpoint }}"
+      - "connect.json must be placed at {{ mc_root }}/gate/connect.json, mode 600, before the tunnel will authenticate."

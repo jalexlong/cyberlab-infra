@@ -57,9 +57,38 @@ all:
         localhost:
           ansible_connection: local
 
+    # Every template and server playbook runs against this whole group and then
+    # ends the play on any host that is not the entry's `target_node`. Adding a
+    # node here therefore does NOT cause work to run on it -- the catalog does.
+    # Before that gate existed, `target_node` was declared in the catalog and
+    # read by nothing, so a second node here would have built every template on
+    # both hosts at once.
     proxmox_targets:
       hosts:
         pve1:
           ansible_host: 10.64.62.200
           ansible_user: root
           ansible_ssh_private_key_file: /root/.ssh/id_ed25519_controller
+
+        # pve2 is a standalone node, NOT a cluster member with pve1: there is no
+        # corosync config on either. Nothing can be cloned or migrated between
+        # the two through the API, so each node needs its own golden templates
+        # built from the same catalog rather than one shared set.
+        #
+        # It also has no SDN, no prov0, and no controller CT 800. Catalog
+        # entries targeting it must use `bridge: vmbr0`, DHCP addressing, and
+        # `ssh_pubkey_source: host_file`.
+        pve2:
+          ansible_host: 10.64.62.201
+          ansible_user: root
+          ansible_ssh_private_key_file: /root/.ssh/id_ed25519_controller
+
+    # Declared empty on purpose. controller-provision-server.yml fills this at
+    # runtime with `add_host` once it has cloned a server and discovered its
+    # DHCP address, which cannot be known ahead of time. The group is written
+    # out here anyway so that the play targeting it is checkable against this
+    # file -- tests/test_inventory_consistency.py asserts every play targets
+    # something the inventory declares, and a runtime-only group would either
+    # fail that check or force it to be loosened.
+    provisioned_servers:
+      hosts: {}

@@ -52,6 +52,13 @@
           - template_def.vmid is defined
         fail_msg: "Template definition for {{ selected_template_name }} was not found."
 
+    # See controller-prepare-template-vm.yml. Promote is the stage where
+    # skipping this gate would do lasting damage: `qm template` is irreversible,
+    # so converting the wrong node's VM cannot be undone by re-running.
+    - name: End play on nodes this template does not target
+      ansible.builtin.meta: end_host
+      when: template_def.target_node != inventory_hostname
+
     - name: Assert template VMID is in template range
       ansible.builtin.assert:
         that:

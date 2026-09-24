@@ -186,11 +186,93 @@ When using cloud images:
 
 ---
 
+## Multi-node rule
+
+The pipeline runs on more than one Proxmox node, and which node does the work is
+decided by the **catalog**, not by the inventory.
+
+Every stage runs against the whole `proxmox_targets` group and then ends the play
+on any host that is not the entry's `target_node`. Adding a node to the inventory
+therefore does not cause work to run on it; adding a catalog entry that names it
+does.
+
+This gate is load-bearing rather than cosmetic. `target_node` was present in the
+catalog from the beginning and **read by nothing** — harmless only for as long as
+`proxmox_targets` held exactly one host. Adding `pve2` without it would have
+built every template on both nodes at once, and at the promote stage that is not
+recoverable: `qm template` is irreversible.
+
+### Each node needs its own build of the same image
+
+`pve1` and `pve2` are **standalone nodes, not cluster members** — there is no
+corosync configuration on either. A template promoted on one is invisible to the
+other, and nothing can be cloned or migrated between them through the API.
+
+So the same operating system appears as two catalog entries, one per node, rather
+than one entry with two targets:
+
+| Entry | Node | Network | Addressing |
+|---|---|---|---|
+| `debian13` | `pve1` | `prov0` | static `bootstrap_ip` |
+| `debian13-pve2` | `pve2` | `vmbr0` | district DHCP |
+
+### Two things differ per node, and both are catalog fields
+
+**Where the SSH key comes from.** `pve1` keeps it inside controller CT `800`;
+`pve2` has no such container, so the key is a file on the node. Selected by
+`ssh_pubkey_source` (`controller_ct` or `host_file`).
+
+**How the guest's address is found.** With a `bootstrap_ip` the address is known
+before the guest boots. Without one it is discovered by
+`scripts/discover-guest-ip.sh`, which resolves the guest's MAC to an IPv4 address
+through the host's neighbour table.
+
+Discovery cannot use the QEMU guest agent for a first build: Debian's
+genericcloud image does not ship `qemu-guest-agent`, and the finalize stage is
+what installs it. The script tries the agent first anyway, because it does work
+on every later run, then falls back to the neighbour table, and only sweeps the
+host's own subnets as a last resort.
+
+---
+
+## From template to running server
+
+Promotion is not the end of the road. A golden template is a source image; a
+running server is cloned from one and then specialised.
+
+```
+ansible/vars/templates.yml  ->  golden template  (VMID 900-949, per node)
+ansible/vars/servers.yml    ->  running server   (VMID 500-599, cloned from one)
+```
+
+`ansible/playbooks/controller-provision-server.yml` clones a promoted template
+into a server VMID, applies the resource shape from the server catalog, and hands
+the guest to a role task file under `ansible/tasks/server-roles/`.
+
+The provisioning playbook runs in two plays on purpose. The first runs on the
+Proxmox node and does everything needing `qm`. The second runs against the guest
+itself, so role task files use ordinary modules instead of the SSH heredocs the
+finalize stage is forced into. Finalize has no choice — it runs while the guest
+is still being cleaned for imaging. A provisioned server is a normal host and is
+treated as one.
+
+It asserts that a server and its template target the same node, because the
+not-a-cluster constraint above would otherwise surface as a confusing
+"template not found" on a node that is behaving correctly.
+
+See `docs/minecraft-server.md` for the first role built on this.
+
+---
+
 ## Source of truth
 
 Template metadata lives in:
 
 - `ansible/vars/templates.yml`
+
+Server metadata lives in:
+
+- `ansible/vars/servers.yml`
 
 VMID policy lives in:
 

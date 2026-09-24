@@ -1,0 +1,155 @@
+---
+# Server catalog.
+#
+# `templates.yml` answers "what operating system images exist". This file
+# answers "what kinds of running server do we spin up from them". The two are
+# deliberately separate: a template is built once and rarely, a server is cloned
+# from a template often and in several shapes.
+#
+# Relationship to the template catalog:
+#
+#   templates.yml   ->  golden template (VMID 900-949, per node)
+#   servers.yml     ->  running server  (VMID 500-599, cloned from one)
+#
+# `from_template` names a `templates.yml` entry by its `id`. The provisioning
+# playbook asserts that the named template exists, is enabled, and targets the
+# same node -- because the two hosts are not clustered, a server cannot be
+# cloned from a template that lives on the other one.
+#
+# VMID ranges in use across the project:
+#
+#   500-599   servers provisioned from this catalog
+#   800-899   infrastructure containers (800 controller, 801 package cache)
+#   900-949   golden templates
+#   950-999   disposable validation clones
+#
+# `role` selects a task file under ansible/tasks/server-roles/<role>.yml, which
+# is what turns a generic Debian clone into a specific kind of server.
+
+servers:
+  # ---------------------------------------------------------------------------
+  # Minecraft: Gate proxy plus Paper backends.
+  #
+  # See docs/minecraft-server.md. The shape is one VM hosting a Gate proxy that
+  # holds the outbound Minekube Connect tunnel, plus one or more Paper backends
+  # bound to loopback that are never reachable from outside directly.
+  # ---------------------------------------------------------------------------
+  - id: mc-gate
+    name: mc-gate
+    display_name: "Minecraft (Gate + Paper)"
+    vmid: 501
+    enabled: true
+
+    target_node: pve2
+    from_template: debian13-pve2
+    role: minecraft
+
+    # 8 vCPU is generous for one Paper server, whose main loop is largely
+    # single-threaded, and is sized for several student backends sharing the
+    # box rather than for one server going faster.
+    cores: 8
+    sockets: 1
+    cpu: host
+
+    # Ballooning off: a JVM sized against a heap that can be taken away from it
+    # will be OOM-killed under exactly the load it was sized for.
+    memory: 32768
+    balloon: 0
+
+    disk_size: 250G
+    disk_storage: local-lvm
+
+    bridge: vmbr0
+    ipconfig0: "ip=dhcp"
+    ci_user: cyberlab
+    onboot: true
+
+    full_clone: true
+
+    description: "Minecraft Gate proxy and Paper backends. See docs/minecraft-server.md"
+    tags: "server;minecraft;pve2"
+
+    role_vars:
+      gate_version: "0.74.11"
+
+      # The Connect endpoint name is public: it is part of the address players
+      # type. Set this to the name registered in the Minekube dashboard. It is
+      # deliberately not defaulted to anything school-identifying.
+      connect_endpoint: "CHANGE-ME"
+
+      # Gate authenticates against Mojang and forwards a signed identity;
+      # backends trust only that. This is what makes the whitelist meaningful
+      # rather than a username string anyone can claim.
+      gate_online_mode: true
+
+      # Gate's local listener, for LAN testing only. The Connect tunnel does
+      # not need it.
+      gate_listen: "0.0.0.0:25565"
+
+      # Java 25, not 21. Checked against the PaperMC API on 2026-09-24 rather
+      # than assumed: Paper 26.2 declares `java.version.minimum: 25`, and it is
+      # the ONLY Paper version still marked SUPPORTED. Every Java-21-era release
+      # is already end-of-life -- 1.21.11 ended 2026-06-15, 26.1.2 ended
+      # 2026-07-26. Running a student-facing server on an unsupported branch to
+      # avoid a Java bump would be the wrong trade.
+      #
+      # `openjdk-25-jre-headless` is in Debian 13 trixie proper
+      # (25.0.3+9-2~deb13u1), so this needs no backport and no Adoptium repo.
+      java_package: openjdk-25-jre-headless
+
+      # Pinned, not "latest". The API's newest build for this line is resolved
+      # at install time and checksum-verified, but the MINECRAFT version is a
+      # deliberate choice: 26.3 exists and is channel ALPHA, which is not what
+      # students should be playing on.
+      paper_version: "26.2"
+
+      backends:
+        - name: lobby
+          port: 30066
+          memory: 4G
+
+  # ---------------------------------------------------------------------------
+  # Generic web server.
+  #
+  # Disabled by default and NOT a description of the existing site. The live
+  # www.farmcardscode.org runs on pve2 as hand-built VM 500 and is not managed
+  # by this catalog; provisioning this entry would build a second, separate VM.
+  # Adopting VM 500 would mean rebuilding it, which is not worth doing to a
+  # working public site.
+  # ---------------------------------------------------------------------------
+  - id: web
+    name: web01
+    display_name: "Web server (nginx)"
+    vmid: 502
+    enabled: false
+
+    target_node: pve2
+    from_template: debian13-pve2
+    role: web
+
+    cores: 2
+    sockets: 1
+    cpu: host
+    memory: 4096
+    balloon: 0
+
+    disk_size: 40G
+    disk_storage: local-lvm
+
+    bridge: vmbr0
+    ipconfig0: "ip=dhcp"
+    ci_user: cyberlab
+    onboot: true
+
+    full_clone: true
+
+    description: "Generic nginx web server"
+    tags: "server;web;pve2"
+
+    role_vars:
+      # Outbound-only publishing, matching the project's standing rule that
+      # nothing on the school side accepts inbound connections. Leave the token
+      # empty to install cloudflared without enrolling a tunnel.
+      cloudflared_enabled: false
+      cloudflared_token: ""
+      server_name: "_"

@@ -9,6 +9,8 @@
   vars:
     image_cache_dir: /var/lib/vz/template/qcow2
     controller_pubkey_path_in_ct: /root/.ssh/id_ed25519_controller.pub
+    # Only consulted for entries whose ssh_pubkey_source is controller_ct.
+    controller_ctid: 800
 
   tasks:
     - name: Resolve selected template name
@@ -61,6 +63,15 @@
           - template_def.cloudinit_storage is defined
           - template_def.bridge is defined
         fail_msg: "Template definition for {{ selected_template_name }} is missing required keys."
+
+    # `target_node` was in the catalog from the start and read by nothing. That
+    # was invisible while `proxmox_targets` held exactly one host; adding pve2
+    # made it load-bearing. Without this gate, building `debian13` would create
+    # VMID 900 on pve2 as well as pve1 -- silently, and on a node that has no
+    # prov0 for it to boot onto.
+    - name: End play on nodes this template does not target
+      ansible.builtin.meta: end_host
+      when: template_def.target_node != inventory_hostname
 
     - name: Assert template VMID is in template range
       ansible.builtin.assert:
@@ -193,23 +204,64 @@
           - "{{ template_def.disk_storage }}:vm-{{ template_def.vmid }}-disk-0,discard=on,ssd=1"
       when: disk_present_result.rc != 0
 
-    - name: Read controller SSH public key from controller CT
+    # Where the key comes from is a property of the NODE, not of the image, but
+    # it is expressed per catalog entry because that is the only place a node
+    # appears. pve1 keeps its key inside controller CT 800; pve2 has no such
+    # container, so the key has to be a file on the node itself.
+    - name: Read template SSH public key from the controller CT
       ansible.builtin.command:
         argv:
           - pct
           - exec
-          - "800"
+          - "{{ controller_ctid | string }}"
           - --
           - cat
           - "{{ controller_pubkey_path_in_ct }}"
       register: controller_template_pubkey
       changed_when: false
+      when: (template_def.ssh_pubkey_source | default('controller_ct')) == 'controller_ct'
+
+    - name: Read template SSH public key from a file on the node
+      ansible.builtin.slurp:
+        src: "{{ template_def.ssh_pubkey_path }}"
+      register: host_template_pubkey
+      failed_when: false
+      when: (template_def.ssh_pubkey_source | default('controller_ct')) == 'host_file'
+
+    - name: Resolve the template SSH public key
+      ansible.builtin.set_fact:
+        template_pubkey_content: >-
+          {{
+            controller_template_pubkey.stdout
+            if (template_def.ssh_pubkey_source | default('controller_ct')) == 'controller_ct'
+            else (host_template_pubkey.content | default('') | b64decode)
+          }}
+
+    # Without this the failure surfaces much later and in the wrong place: the
+    # VM builds, cloud-init installs an empty authorized_keys, and the finalize
+    # stage times out waiting for an SSH login that can never succeed.
+    - name: Require a usable template SSH public key
+      ansible.builtin.assert:
+        that:
+          - template_pubkey_content | trim | length > 0
+          - "'ssh-' in template_pubkey_content"
+        fail_msg: >-
+          No usable SSH public key for template '{{ template_def.name }}' on
+          {{ inventory_hostname }}.
+          {{
+            "Expected to read it from controller CT " ~ controller_ctid ~ " at "
+            ~ controller_pubkey_path_in_ct
+            if (template_def.ssh_pubkey_source | default('controller_ct')) == 'controller_ct'
+            else "Expected a public key file at " ~ (template_def.ssh_pubkey_path | default('<unset>'))
+                 ~ " on " ~ inventory_hostname ~ ". Create it there, or point"
+                 ~ " ssh_pubkey_path at a key that exists."
+          }}
 
     - name: Write temporary controller SSH public key file
       ansible.builtin.copy:
         dest: /tmp/controller-template-key.pub
         mode: "0644"
-        content: "{{ controller_template_pubkey.stdout }}"
+        content: "{{ template_pubkey_content }}"
 
     - name: Configure template VM defaults
       ansible.builtin.command:

@@ -44,6 +44,95 @@ templates:
     description: "Cyberlab Debian 13 base template"
     tags: "template;debian13;linux;base"
 
+    ssh_pubkey_source: controller_ct
+
+  # The same Debian 13 image, built on pve2 instead. This is a separate catalog
+  # entry rather than a second target for the pve1 entry because the two nodes
+  # are NOT clustered -- a template promoted on pve1 is invisible to pve2, so
+  # each node needs its own build of the same thing.
+  #
+  # It shares pve1's 900/950 VMID pair deliberately. VMIDs are unique per
+  # cluster, and these are two standalone nodes, so the pair is free on pve2.
+  # It is also the RIGHT pair rather than merely an available one: pve2 hosts
+  # student and school project servers, not lab images, so debian13 is the only
+  # template it will ever carry and there is nothing for it to collide with.
+  # None of the cyberlab images below are ever built here.
+  #
+  # Everything that differs from the pve1 entry differs because pve2 has no SDN:
+  # no prov0 to build over, so `vmbr0` and district DHCP; no static bootstrap
+  # address, so the finalize stage discovers the address through the guest
+  # agent; and no controller CT 800, so the SSH key comes from a file on the
+  # node itself.
+  # The `id` keeps the -pve2 suffix even though the name does not. Templates are
+  # resolved by id OR name, and the catalog must never have two entries that a
+  # single string could match -- a bare `debian13` id here would be ambiguous
+  # with pve1's entry and trip the "exactly one matching template" assertion.
+  # The VM's own name has no such constraint, since it only has to be unique on
+  # its node.
+  - id: debian13-pve2
+    name: tpl-debian13
+    display_name: "Debian 13 (pve2)"
+    vmid: 900
+    test_clone_vmid: 950
+    build_method: cloud_image
+    enabled: true
+
+    os_family: debian
+    version: "13"
+
+    image_url: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+    image_filename: "debian-13-genericcloud-amd64.qcow2"
+
+    target_node: pve2
+    memory: 2048
+    cores: 2
+    sockets: 1
+    # `host` rather than pve1's `x86-64-v2-AES`: that value exists to keep a
+    # template migratable across dissimilar hardware, and pve2 is standalone, so
+    # nothing it builds will ever be live-migrated. Both nodes are R730s anyway.
+    cpu: host
+    machine: q35
+    bios: seabios
+    scsihw: virtio-scsi-single
+    disk_storage: local-lvm
+    cloudinit_storage: local-lvm
+
+    bridge: vmbr0
+    net_model: virtio
+    serial_socket: true
+    vga: serial0
+    agent_enabled: true
+
+    ci_user: cyberlab
+    ci_upgrade: true
+
+    # No bootstrap_ip. pve2's only network is the flat district LAN, where
+    # addresses come from the district's DHCP server and cannot be predicted.
+    # Omitting it switches the finalize stage to guest-agent discovery, which is
+    # why agent_enabled above is load-bearing here rather than cosmetic.
+    ipconfig0: "ip=dhcp"
+
+    # No nameserver/searchdomain either: district DHCP supplies both, and
+    # setting them would override working resolution with a guess.
+
+    # A file holding EVERY key that should be able to reach a guest built from
+    # this template. It carries two: the operator's workstation key, so
+    # provisioning can be driven from a laptop, and pve2's own `id_rsa.pub`, so
+    # a run started on the node itself also works. Baking only one of them
+    # produces a template that works from exactly one place and fails
+    # mysteriously from the other.
+    ssh_pubkey_source: host_file
+    ssh_pubkey_path: /root/.ssh/cyberlab-template.pub
+
+    # The private half used by the finalize stage, which SSHes from the node
+    # into the guest. pve2's own key -- its public half is one of the two in
+    # cyberlab-template.pub above.
+    finalize_ssh_private_key: /root/.ssh/id_rsa
+
+    boot: order=scsi0
+    description: "Cyberlab Debian 13 base template (pve2, flat network)"
+    tags: "template;debian13;linux;base;pve2"
+
   - id: ubuntu2604
     name: tpl-ubuntu2604-base
     display_name: "Ubuntu 26.04"
