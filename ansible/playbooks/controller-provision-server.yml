@@ -341,15 +341,15 @@
   # Handlers have to live at play level: a task file pulled in with
   # include_tasks can notify a handler but cannot define one.
   handlers:
-    # Only meaningful once the operator has chosen to start Gate. While it is
-    # enabled-but-stopped, a config change should leave it stopped rather than
-    # quietly publishing the server to the internet as a side effect of a
-    # re-run.
+    # try-restart: restart Gate if it is running, do nothing if it is stopped.
+    # A config change must reach a live Gate whether or not this run passed
+    # mc_start_gate -- a rotated forwarding secret that reached Paper but not
+    # Gate would lock every player out -- while an enabled-but-stopped Gate
+    # stays stopped rather than publishing the server to the internet as a
+    # side effect of a re-run. The systemd module has no try-restart.
     - name: Restart Gate
-      ansible.builtin.systemd_service:
-        name: gate
-        state: restarted
-      when: mc_start_gate | default(false) | bool
+      ansible.builtin.command: systemctl try-restart gate  # noqa: command-instead-of-module
+      changed_when: true
 
     # The loop is empty for any role that defines no backends, which is how this
     # stays harmless for the web role.
