@@ -82,13 +82,3 @@ all:
           ansible_host: 10.64.62.201
           ansible_user: root
           ansible_ssh_private_key_file: /root/.ssh/id_ed25519_controller
-
-    # Declared empty on purpose. controller-provision-server.yml fills this at
-    # runtime with `add_host` once it has cloned a server and discovered its
-    # DHCP address, which cannot be known ahead of time. The group is written
-    # out here anyway so that the play targeting it is checkable against this
-    # file -- tests/test_inventory_consistency.py asserts every play targets
-    # something the inventory declares, and a runtime-only group would either
-    # fail that check or force it to be loosened.
-    provisioned_servers:
-      hosts: {}

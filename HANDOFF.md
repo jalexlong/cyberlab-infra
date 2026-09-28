@@ -34,9 +34,6 @@ because the inventory hardcodes the controller's path:
     cd ansible && ansible-playbook -i inventory.yml <playbook> \
       -e ansible_ssh_private_key_file=/Users/jlong/.ssh/claude-key
 
-For `controller-provision-server.yml`, add `-e server_ssh_private_key=` with the
-same path — the second play connects to the *guest*, not the node.
-
 `host-bootstrap.yml` is still the exception: it targets `proxmox_hosts`, which is
 `localhost` with `ansible_connection: local`, so it runs ON the node.
 
@@ -90,26 +87,20 @@ holds a live website, and a two-node cluster has no quorum.
 `pve2` carries **only** `debian13`. None of the cyberlab lab images are ever
 built there.
 
-## Minecraft — live, and nobody can join
+## Minecraft moved to its own repository — 2026-09-28
 
-`docs/minecraft-server.md` is the real reference. State as of 2026-09-24:
+The server catalog, provisioning playbook, server roles and Minecraft server
+moved to **`school-services-infra`** (private), with their history. Work on
+pve2's services happens there; its own docs and memory are the reference.
 
-- VM `501` at `10.64.62.137`. Paper **26.2 build 129 on OpenJDK 25.0.4.1**.
-- `paper@lobby` active on **127.0.0.1:30066 and nowhere else**. `gate` active,
-  tunnel established.
-- Verified by Minecraft server-list ping from the public internet at **both**
-  `mc-gate.play.minekube.net` and `mc.farmcardscode.org`.
-- **`whitelist.json` is `[]`** with `white-list` and `enforce-whitelist` true.
-  The server is reachable and joinable by nobody. That is the safe intermediate
-  state, deliberately.
+What stays here: the template pipeline still builds pve2's `debian13-pve2`
+template, so that catalog entry, pve2's inventory line and
+`scripts/discover-guest-ip.sh` remain until a pve2 template build exists in the
+new repository.
 
-**Java 25, not 21.** Paper 26.2 declares `java.version.minimum: 25` and is the
-only version still marked `SUPPORTED`; every Java-21-era release is EOL. The
-role asserts the resolved build is `STABLE`, because 26.3 exists and is `ALPHA`.
-
-Owed next, in order: add your own account to the whitelist and confirm a
-non-whitelisted account is refused; district IT sign-off before students are
-admitted; VLAN segmentation; backups.
+**pve1's `cyberlab` pool shrank the same day.** `mirror-3` was removed with
+`zpool remove` and its two SSDs (bays 7 and 8) moved to pve2 as the backup
+mirror. The pool is three mirrors, 5.44 TB, fully redundant; scrub clean.
 
 ## Task 1 — bake the cache client config into the template images
 

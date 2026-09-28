@@ -235,32 +235,14 @@ host's own subnets as a last resort.
 
 ---
 
-## From template to running server
+## Templates for other repositories
 
-Promotion is not the end of the road. A golden template is a source image; a
-running server is cloned from one and then specialised.
-
-```
-ansible/vars/templates.yml  ->  golden template  (VMID 900-949, per node)
-ansible/vars/servers.yml    ->  running server   (VMID 500-599, cloned from one)
-```
-
-`ansible/playbooks/controller-provision-server.yml` clones a promoted template
-into a server VMID, applies the resource shape from the server catalog, and hands
-the guest to a role task file under `ansible/tasks/server-roles/`.
-
-The provisioning playbook runs in two plays on purpose. The first runs on the
-Proxmox node and does everything needing `qm`. The second runs against the guest
-itself, so role task files use ordinary modules instead of the SSH heredocs the
-finalize stage is forced into. Finalize has no choice — it runs while the guest
-is still being cleaned for imaging. A provisioned server is a normal host and is
-treated as one.
-
-It asserts that a server and its template target the same node, because the
-not-a-cluster constraint above would otherwise surface as a confusing
-"template not found" on a node that is behaving correctly.
-
-See `docs/minecraft-server.md` for the first role built on this.
+`pve2`'s `debian13-pve2` template is built by this pipeline but consumed
+elsewhere: the server catalog and provisioning playbook that clone it into
+running servers moved to the `school-services-infra` repository on 2026-09-28,
+along with the Minecraft server built on them. That repository carries a copy of
+the catalog entry; keep the two in agreement until the pve2 template build moves
+there too.
 
 ---
 
@@ -269,10 +251,6 @@ See `docs/minecraft-server.md` for the first role built on this.
 Template metadata lives in:
 
 - `ansible/vars/templates.yml`
-
-Server metadata lives in:
-
-- `ansible/vars/servers.yml`
 
 VMID policy lives in:
 
