@@ -79,22 +79,27 @@ ansible-playbook -i inventory.yml \
   playbooks/controller-build-template-pipeline.yml -e template_name=debian13-pve2
 ```
 
-### Two things provisioning will not do for you
+### Gate and the tunnel
 
-**It will not start Gate.** Starting Gate opens the Connect tunnel, which is the
-moment the server becomes reachable from the internet. The role leaves the unit
-`enabled` but stopped. Start it deliberately:
+**Provisioning will not start Gate unless asked.** Starting Gate opens the
+Connect tunnel, which is the moment the server becomes reachable from the
+internet. The role leaves the unit `enabled` but stopped unless you pass
+`-e mc_start_gate=true`. On `mc-gate` the tunnel is live, so pass it on every
+re-run to keep the report honest; omitting it does not stop a running Gate.
 
-```bash
-systemctl start gate
-```
+**Gate writes `connect.json` itself** on first registration of an unclaimed
+endpoint name, at `/opt/minecraft/gate/connect.json`. That file is the endpoint
+credential, and Gate writes it world-readable, so the role forces mode `600` on
+every run. It is never committed.
 
-or pass `-e mc_start_gate=true` when you mean it.
+### Re-running is safe for the VM, not yet for Paper's config
 
-**It will not supply `connect.json`.** That file holds the endpoint token, is a
-credential, and is never committed. Place it at
-`/opt/minecraft/gate/connect.json`, mode `600`, before the tunnel will
-authenticate.
+Re-running provisioning against an existing server keeps its NIC MAC address,
+so its DHCP lease survives. It does **not** yet leave Paper's configuration
+alone: Paper expands `server.properties` and `config/paper-global.yml` with its
+full defaults at startup, the role rewrites them to its minimal versions, and
+every run therefore restarts the backends and discards any hand edits in those
+two files.
 
 ---
 
@@ -107,6 +112,7 @@ Checked against the upstream APIs on 2026-09-24 rather than assumed.
 | Gate | v0.74.11 | The current release; asset `gate_0.74.11_linux_amd64` |
 | Paper | 26.2, build resolved at install time | The only version still marked `SUPPORTED` |
 | Java | `openjdk-25-jre-headless` | Paper 26.2 declares `java.version.minimum: 25` |
+| ViaVersion | 5.12.0, from Modrinth | Lets newer clients join; see below |
 
 **Java 25, not 21.** This corrects the assumption the project started from.
 Every Paper version that runs on Java 21 is already end-of-life — 1.21.11's
@@ -122,6 +128,19 @@ put students on an alpha.
 **The PaperMC v2 API is gone** — it returns `410`. The role uses
 `https://fill.papermc.io/v3/`, which also yields a SHA-256, so the jar is
 verified rather than trusted.
+
+**ViaVersion is how new clients get in.** The vanilla launcher auto-updates
+players to the newest Minecraft release, and Paper's build for a new release
+stays `ALPHA` for weeks — 26.2 took six from first build to `STABLE`. Without a
+translation layer, every Minecraft release locks everyone out until Paper
+catches up; 26.3 did exactly that on 2026-09-28. ViaVersion runs on each
+backend and lets clients newer than the server join it.
+
+Plugins come from the `modrinth_plugins` list in the catalog, pinned by version
+and held to the same bar as Paper: the role requires a `release` build that
+loads on Paper and lists the server's Minecraft version, and verifies the
+SHA-512. Each lands as `plugins/<slug>.jar`, so a bump replaces the old jar.
+Removing an entry does not delete its jar.
 
 ---
 
@@ -154,7 +173,93 @@ regenerated on a re-run — doing so would break every backend at once, since Ga
 and Paper must agree on it exactly.
 
 The whitelist is seeded empty and then left alone (`force: false`), so players
-added through the console survive a re-provision.
+added by hand survive a re-provision.
+
+---
+
+## Whitelist requests
+
+Students request access through a Google Form. Its response Sheet runs
+`scripts/minecraft-whitelist-form.gs`, which looks up each Java username with
+Mojang and fills in the account's UUID and canonical name. Nothing is approved
+automatically.
+
+**Keep the form and Sheet in the district Google Workspace, shared with no one.**
+They link real students to Minecraft accounts, which is FERPA-covered, and none
+of it belongs in this repository.
+
+### The form
+
+Settings: *Responses → Collect email addresses → Verified*, and restrict
+responses to the district domain. Signing in identifies the student, so the form
+needs no name field.
+
+| Question | Type | Notes |
+|---|---|---|
+| `Which edition of Minecraft do you play?` | Multiple choice, required | `Java Edition (PC/Mac)`, `Bedrock Edition (console, phone, Windows store)` |
+| `Minecraft Java username` | Short answer, required | Response validation: regular expression, matches `^[A-Za-z0-9_]{3,16}$` |
+| `Class period` | Dropdown, optional | Whatever helps you match rows to classes |
+
+Help text for the username question — this is the mistake that actually
+happens, so say it plainly:
+
+> The name shown in the top corner of the Minecraft Launcher, or on your
+> profile at minecraft.net. It is 3–16 letters, numbers or underscores with no
+> spaces. It is **not** your Xbox or Microsoft gamertag.
+
+Question titles must match the `QUESTION_` constants at the top of the script
+exactly; the script stops with an error naming the one it cannot find.
+
+### Setting up the Sheet
+
+1. From the form's *Responses* tab, link it to a new Sheet.
+2. In the Sheet, *Extensions → Apps Script*, paste the script, save.
+3. Run `installTrigger` once from the editor and accept the permission prompt.
+   It installs the submit trigger and adds the `UUID`, `Canonical name`,
+   `Lookup status`, `Checked at` and `Approved` columns.
+4. Reload the Sheet. A *Whitelist* menu appears.
+
+`Lookup status` is one of `OK`, `Not a Java username`, `No such Java account`,
+`Bedrock: not supported yet`, `Duplicate of row N`, or a transient failure.
+Apps Script fetches from Google's shared addresses, which Mojang may rate-limit;
+*Whitelist → Recheck unresolved rows* retries only the transient ones.
+
+### Approving
+
+A lookup proves the account exists, not that the student owns it. The strong
+check is a refused join: ask the student to try `mc.farmcardscode.org` once, and
+the lobby log records their verified identity:
+
+```
+UUID of player ExamplePlayer is 00000000-0000-4000-8000-000000000000
+Disconnecting ExamplePlayer (...): You are not whitelisted on this server!
+```
+
+```bash
+grep -E "UUID of player|not whitelisted" /opt/minecraft/servers/lobby/logs/latest.log
+```
+
+Tick *Approved* for rows whose UUID matches, then *Whitelist → Export approved
+as whitelist.json*.
+
+### Applying the whitelist
+
+There is no console yet — Paper runs `--nogui` with no RCON — so the file is
+replaced with the backend stopped. Paper reads `whitelist.json` only at startup
+and writes its in-memory list back whenever the list changes, so an edit made
+while it runs is ignored and can later be overwritten.
+
+```bash
+cd /opt/minecraft/servers/lobby
+systemctl stop paper@lobby
+cp -p whitelist.json whitelist.json.bak-$(date +%Y%m%d)
+# paste the exported JSON into whitelist.json
+chown minecraft:minecraft whitelist.json && chmod 0640 whitelist.json
+python3 -m json.tool whitelist.json >/dev/null && systemctl start paper@lobby
+```
+
+The export is the whole list, not a delta: it replaces what is there, so anyone
+added by hand and not in the Sheet is removed.
 
 ---
 
@@ -166,19 +271,17 @@ These are open and matter in roughly this order.
    outbound tunnel bypasses the perimeter by design, which is exactly what
    network policy governs. Building the VM does not require sign-off; admitting
    students does.
-2. **A neutral Connect endpoint name.** The endpoint is public — it is part of
-   the address players type. `role_vars.connect_endpoint` is deliberately
-   unset (`CHANGE-ME`) and the role refuses to run until it is set.
-3. **VLAN segmentation.** `pve2` has no firewall enabled and a flat network, so
+2. **VLAN segmentation.** `pve2` has no firewall enabled and a flat network, so
    any guest can currently reach the Proxmox and iDRAC management interfaces.
    The VM may test on the flat network but must move to its own VLAN before
    students are admitted.
-4. **Backups.** `pve2` is a single non-redundant SSD carrying Proxmox, the live
+3. **Backups.** `pve2` is a single non-redundant SSD carrying Proxmox, the live
    website, and this server. Proxmox Backup Server on `pve1` is the plan.
-5. **Bedrock** via Gate's Geyser, after Java is proven end to end.
-6. **Roster-driven whitelist sync** — student submits a username, teacher
-   approves, a script regenerates the whitelist. A good student project.
-7. **Pelican Panel** for most students, Proxmox LXC for advanced ones.
+4. **Bedrock** via Gate's Geyser, after Java is proven end to end.
+5. **Roster-driven whitelist sync.** The request form and lookup exist (see
+   Whitelist requests); pushing approved rows to the server automatically
+   waits on RCON. A good student project.
+6. **Pelican Panel** for most students, Proxmox LXC for advanced ones.
 
 ## Compliance
 

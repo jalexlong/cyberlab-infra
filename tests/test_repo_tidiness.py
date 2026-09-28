@@ -19,6 +19,7 @@ from conftest import REPO_ROOT
 # Extensions treated as text. Anything else is left alone.
 TEXT_SUFFIXES = {
     ".cfg",
+    ".gs",
     ".md",
     ".py",
     ".sh",
