@@ -109,6 +109,18 @@ servers:
       # students should be playing on.
       paper_version: "26.2"
 
+      # Installed into every backend from Modrinth, at a pinned version.
+      #
+      # ViaVersion lets clients NEWER than the server join it. The vanilla
+      # launcher auto-updates players to the newest Minecraft release, while
+      # Paper's build for that release sits in ALPHA for weeks -- 26.3 was
+      # released while paper_version above was still correctly 26.2 -- so
+      # without this every Minecraft release locks students out until Paper
+      # catches up. 5.12.0 is a release build listing 26.3, checked 2026-09-28.
+      modrinth_plugins:
+        - slug: viaversion
+          version: "5.12.0"
+
       backends:
         - name: lobby
           port: 30066

@@ -224,6 +224,71 @@
     label: "{{ item.name }}"
   notify: Restart Paper backends
 
+# ---------------------------------------------------------------------------
+# Plugins, from Modrinth
+#
+# Held to the same standard as the Paper jar: resolved through the API at a
+# pinned version, required to be a release build that declares support for this
+# server's Minecraft version, and SHA-512 verified on download.
+#
+# Each jar is written as <slug>.jar rather than under its upstream filename, so
+# a version bump overwrites the old jar instead of leaving two copies of the
+# same plugin for Paper to refuse. Removing a plugin from the catalog does NOT
+# delete its jar; do that by hand.
+# ---------------------------------------------------------------------------
+- name: Resolve each pinned plugin version on Modrinth
+  ansible.builtin.uri:
+    url: "https://api.modrinth.com/v2/project/{{ item.slug }}/version/{{ item.version }}"
+    return_content: true
+    headers:
+      User-Agent: "cyberlab-infra/1.0 (ansible provisioning)"
+  loop: "{{ mc.modrinth_plugins | default([]) }}"
+  loop_control:
+    label: "{{ item.slug }} {{ item.version }}"
+  register: plugin_versions
+
+- name: Require each plugin to be a release that supports this Paper version
+  ansible.builtin.assert:
+    that:
+      - item.json.version_type == 'release'
+      - "'paper' in item.json.loaders"
+      - mc.paper_version in item.json.game_versions
+    fail_msg: >-
+      {{ item.item.slug }} {{ item.item.version }} is channel
+      '{{ item.json.version_type }}' with loaders {{ item.json.loaders }},
+      supporting up to {{ item.json.game_versions | last }}. It must be a
+      release build, load on Paper, and list Paper {{ mc.paper_version }}.
+    success_msg: >-
+      {{ item.item.slug }} {{ item.item.version }} ({{ item.json.version_type }}),
+      supports {{ mc.paper_version }}.
+  loop: "{{ plugin_versions.results }}"
+  loop_control:
+    label: "{{ item.item.slug }}"
+
+- name: Ensure each backend has a plugins directory
+  ansible.builtin.file:
+    path: "{{ mc_root }}/servers/{{ item.name }}/plugins"
+    state: directory
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0750"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Download each plugin into each backend
+  ansible.builtin.get_url:
+    url: "{{ (item.1.json.files | selectattr('primary') | first).url }}"
+    dest: "{{ mc_root }}/servers/{{ item.0.name }}/plugins/{{ item.1.item.slug }}.jar"
+    checksum: "sha512:{{ (item.1.json.files | selectattr('primary') | first).hashes.sha512 }}"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+  loop: "{{ mc.backends | product(plugin_versions.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1.item.slug }}"
+  notify: Restart Paper backends
+
 - name: Accept the Minecraft EULA for each backend
   ansible.builtin.copy:
     dest: "{{ mc_root }}/servers/{{ item.name }}/eula.txt"
