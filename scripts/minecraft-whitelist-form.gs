@@ -5,8 +5,8 @@
  * On each submission this resolves the Java username against Mojang and fills
  * in the account's UUID and canonical name, so a typo or a gamertag is caught
  * before anyone reviews the row. It never approves anything: the teacher ticks
- * Approved, and "Export approved as whitelist.json" produces the file for the
- * server.
+ * Approved, and "Export approved as rconclt commands" produces the commands to
+ * run on the server.
  *
  * The student data this touches lives in the Sheet, inside the district's
  * Google Workspace. None of it belongs in this repository.
@@ -27,6 +27,9 @@ var ADDED_COLUMNS = [COL_UUID, COL_NAME, COL_STATUS, COL_CHECKED, COL_APPROVED];
 // Java usernames are 3-16 letters, digits or underscores. A space means it is
 // almost certainly an Xbox/Microsoft gamertag rather than the Java name.
 var USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/;
+
+// The Paper backend approved players are added to.
+var BACKEND = 'lobby';
 
 var MOJANG_PROFILE_URL = 'https://api.mojang.com/users/profiles/minecraft/';
 
@@ -49,7 +52,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Whitelist')
     .addItem('Recheck unresolved rows', 'recheckUnresolved')
-    .addItem('Export approved as whitelist.json', 'exportWhitelist')
+    .addItem('Export approved as rconclt commands', 'exportWhitelist')
     .addToUi();
 }
 
@@ -72,26 +75,27 @@ function recheckUnresolved() {
   }
 }
 
-/** Show whitelist.json for every approved, resolved row. */
+/** Show an rconclt command for every approved, resolved row. */
 function exportWhitelist() {
   var sheet = responseSheet_();
   var cols = ensureColumns_(sheet);
   var rows = sheet.getRange(2, 1, Math.max(sheet.getLastRow() - 1, 1), sheet.getLastColumn()).getValues();
-  var json = buildWhitelist(rows.map(function (r) {
+  var commands = buildRconCommands(rows.map(function (r) {
     return {
       approved: r[cols[COL_APPROVED] - 1] === true,
       status: r[cols[COL_STATUS] - 1],
       uuid: r[cols[COL_UUID] - 1],
       name: r[cols[COL_NAME] - 1],
     };
-  }));
+  }), BACKEND);
   var html = HtmlService.createHtmlOutput(
-    '<p>Paste over <code>whitelist.json</code> with the backend stopped, then start it.</p>' +
+    '<p>Paste into a root shell on the Minecraft server. Adding a player who is ' +
+    'already whitelisted is harmless.</p>' +
     '<textarea style="width:100%;height:320px;font-family:monospace">' +
-    json.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+    commands.replace(/&/g, '&amp;').replace(/</g, '&lt;') +
     '</textarea>'
   ).setWidth(640).setHeight(440);
-  SpreadsheetApp.getUi().showModalDialog(html, 'whitelist.json');
+  SpreadsheetApp.getUi().showModalDialog(html, 'Whitelist commands');
 }
 
 // ---------------------------------------------------------------------------
@@ -205,19 +209,24 @@ function dashUuid(id) {
   return [s.slice(0, 8), s.slice(8, 12), s.slice(12, 16), s.slice(16, 20), s.slice(20)].join('-');
 }
 
-/** Build whitelist.json text from rows of {approved, status, uuid, name}. */
-function buildWhitelist(rows) {
+/**
+ * Build `rconclt <backend> whitelist add <name>` lines from rows of
+ * {approved, status, uuid, name}. Paper resolves the name to the same Mojang
+ * UUID the lookup found. Names are re-checked against USERNAME_PATTERN because
+ * these lines are pasted into a root shell.
+ */
+function buildRconCommands(rows, backend) {
   var seen = {};
-  var entries = [];
+  var lines = [];
   rows.forEach(function (r) {
-    if (r.approved && r.status === 'OK' && r.uuid && !seen[r.uuid]) {
+    if (r.approved && r.status === 'OK' && r.uuid && !seen[r.uuid] && USERNAME_PATTERN.test(r.name)) {
       seen[r.uuid] = true;
-      entries.push({ uuid: r.uuid, name: r.name });
+      lines.push('rconclt ' + backend + ' whitelist add ' + r.name);
     }
   });
-  return JSON.stringify(entries, null, 2) + '\n';
+  return lines.length ? lines.join('\n') + '\n' : '# No approved players to add.\n';
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { lookupUsername: lookupUsername, dashUuid: dashUuid, buildWhitelist: buildWhitelist };
+  module.exports = { lookupUsername: lookupUsername, dashUuid: dashUuid, buildRconCommands: buildRconCommands };
 }

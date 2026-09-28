@@ -84,22 +84,25 @@ ansible-playbook -i inventory.yml \
 **Provisioning will not start Gate unless asked.** Starting Gate opens the
 Connect tunnel, which is the moment the server becomes reachable from the
 internet. The role leaves the unit `enabled` but stopped unless you pass
-`-e mc_start_gate=true`. On `mc-gate` the tunnel is live, so pass it on every
-re-run to keep the report honest; omitting it does not stop a running Gate.
+`-e mc_start_gate=true`. A re-run never stops a running Gate, and a config
+change restarts Gate only if it is already running (`systemctl try-restart`),
+so the flag matters only for the first start.
 
 **Gate writes `connect.json` itself** on first registration of an unclaimed
 endpoint name, at `/opt/minecraft/gate/connect.json`. That file is the endpoint
 credential, and Gate writes it world-readable, so the role forces mode `600` on
 every run. It is never committed.
 
-### Re-running is safe for the VM, not yet for Paper's config
+### Re-running is safe
 
 Re-running provisioning against an existing server keeps its NIC MAC address,
-so its DHCP lease survives. It does **not** yet leave Paper's configuration
-alone: Paper expands `server.properties` and `config/paper-global.yml` with its
-full defaults at startup, the role rewrites them to its minimal versions, and
-every run therefore restarts the backends and discards any hand edits in those
-two files.
+so its DHCP lease survives, and leaves Paper alone unless something the role
+owns has changed. Paper expands `server.properties` and
+`config/paper-global.yml` with its full defaults at startup, so the role sets
+individual keys rather than writing either file: `server.properties` key by
+key, and `paper-global.yml` merged and compared as data. A second run in a row
+reports no changes and restarts nothing. Keys the role does not own can be
+edited by hand and survive.
 
 ---
 
@@ -153,6 +156,7 @@ Removing an entry does not delete its jar.
 | 19132/udp | Reserved: Bedrock clients, if ever served directly |
 | 30066/tcp | `lobby` Paper backend, bound to `127.0.0.1` |
 | 30067+ | Student backends, assigned sequentially |
+| 31066+ | RCON for each backend, at its game port + 1000, bound to `127.0.0.1` |
 
 The 30066 start is convention, not requirement: it sits clear of the
 25565–25567 range Minecraft, Gate and Geyser use by default. Any unused port
@@ -172,8 +176,48 @@ The Velocity forwarding secret is generated once, stored at
 regenerated on a re-run — doing so would break every backend at once, since Gate
 and Paper must agree on it exactly.
 
+If it is exposed — printed in a terminal, pasted into a chat, committed — rotate
+it deliberately, which rewrites Gate and every backend in one run and restarts
+them together. Anyone online is disconnected and can rejoin straight away:
+
+```bash
+ansible-playbook -i inventory.yml playbooks/controller-provision-server.yml \
+  -e server_name=mc-gate -e mc_rotate_forwarding_secret=true
+```
+
+`/opt/minecraft/gate/config.yml` contains the secret, so do not `cat` it in a
+shared or recorded session. Rotated 2026-09-28 after exactly that.
+
 The whitelist is seeded empty and then left alone (`force: false`), so players
-added by hand survive a re-provision.
+added over RCON survive a re-provision.
+
+---
+
+## Administering a running backend
+
+Each backend has RCON enabled on loopback, with a password generated once into
+`/opt/minecraft/rcon/<backend>.password` (root, `0600`) and written into that
+backend's `server.properties`. RCON is plaintext; binding to the backend's
+loopback `server-ip` is what makes it acceptable.
+
+The client is `rconclt` from Debian's `rcon` package. The role writes
+`/etc/rcon.conf` (root, `0600`) with one section per backend, generated from the
+same password files, so the section name is the backend name. Run it as root:
+
+```bash
+rconclt lobby whitelist add SomePlayer
+rconclt lobby whitelist list
+rconclt lobby list
+```
+
+Run as any other user it fails with `No such server: lobby`: the config file is
+unreadable to them, and `rconclt` silently skips config files it cannot open.
+
+`whitelist add` by name stores the account's real Mojang UUID, not an
+offline-mode one: Paper resolves profiles as online because Velocity forwarding
+runs in online mode. Checked 2026-09-28 against Mojang's API.
+
+
 
 ---
 
@@ -240,26 +284,23 @@ grep -E "UUID of player|not whitelisted" /opt/minecraft/servers/lobby/logs/lates
 ```
 
 Tick *Approved* for rows whose UUID matches, then *Whitelist → Export approved
-as whitelist.json*.
+as rconclt commands*.
 
 ### Applying the whitelist
 
-There is no console yet — Paper runs `--nogui` with no RCON — so the file is
-replaced with the backend stopped. Paper reads `whitelist.json` only at startup
-and writes its in-memory list back whenever the list changes, so an edit made
-while it runs is ignored and can later be overwritten.
+The export is one `rconclt` line per approved player. Paste them into a root
+shell on the server; no restart, players already listed are untouched, and
+re-adding someone is harmless:
 
 ```bash
-cd /opt/minecraft/servers/lobby
-systemctl stop paper@lobby
-cp -p whitelist.json whitelist.json.bak-$(date +%Y%m%d)
-# paste the exported JSON into whitelist.json
-chown minecraft:minecraft whitelist.json && chmod 0640 whitelist.json
-python3 -m json.tool whitelist.json >/dev/null && systemctl start paper@lobby
+ssh cyberlab@<mc-gate address>
+sudo -i
+rconclt lobby whitelist add ExamplePlayer
+rconclt lobby whitelist list
 ```
 
-The export is the whole list, not a delta: it replaces what is there, so anyone
-added by hand and not in the Sheet is removed.
+Removing a player is `rconclt lobby whitelist remove <name>`; unticking
+*Approved* in the Sheet does not remove anyone.
 
 ---
 

@@ -89,6 +89,16 @@
 # would silently break every backend until they were all rewritten together,
 # because Gate and Paper must agree on it exactly.
 # ---------------------------------------------------------------------------
+# Rotation is the one deliberate exception, for when the secret has been
+# exposed: -e mc_rotate_forwarding_secret=true. Everything that consumes it is
+# rewritten below in the same run, and the handlers restart Gate and the
+# backends together.
+- name: Discard the forwarding secret so a new one is generated
+  ansible.builtin.file:
+    path: "{{ mc_secret_file }}"
+    state: absent
+  when: mc_rotate_forwarding_secret | default(false) | bool
+
 - name: Check whether the forwarding secret already exists
   ansible.builtin.stat:
     path: "{{ mc_secret_file }}"
@@ -303,39 +313,141 @@
   loop_control:
     label: "{{ item.name }}"
 
-- name: Write server.properties for each backend
-  ansible.builtin.copy:
-    dest: "{{ mc_root }}/servers/{{ item.name }}/server.properties"
-    owner: "{{ mc_user }}"
-    group: "{{ mc_user }}"
-    mode: "0640"
-    content: |
-      # Managed by ansible/tasks/server-roles/minecraft.yml.
-      #
+# ---------------------------------------------------------------------------
+# Backend configuration
+#
+# Paper rewrites server.properties and config/paper-global.yml at startup,
+# expanding them with every default it knows. Writing either file whole would
+# therefore differ from what is on disk on every run: each re-run would restart
+# every backend and discard anything set by hand. So the role owns individual
+# keys, not files -- it sets the values below and leaves the rest of Paper's
+# file alone, and a run changes nothing unless one of these values differs.
+# ---------------------------------------------------------------------------
+
+# One RCON password per backend, generated once. RCON is how an operator
+# administers a running backend (whitelist, kick, save-off for backups) without
+# a restart. It is plaintext, which is safe only because it binds to the
+# backend's loopback server-ip; rconclt, installed below, is the client.
+- name: Create the RCON secrets directory
+  ansible.builtin.file:
+    path: "{{ mc_root }}/rcon"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Generate an RCON password for each backend
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    head -c 24 /dev/urandom | base64 | tr -d '\n=+/' > {{ mc_root }}/rcon/{{ item.name }}.password
+  args:
+    executable: /bin/bash
+    creates: "{{ mc_root }}/rcon/{{ item.name }}.password"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read each backend's RCON password
+  ansible.builtin.slurp:
+    src: "{{ mc_root }}/rcon/{{ item.name }}.password"
+  loop: "{{ mc.backends }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rcon_password_raw
+  no_log: true
+
+- name: Collect the managed server.properties values
+  ansible.builtin.set_fact:
+    mc_property_lines: >-
+      {{ (mc_property_lines | default([]))
+         + (props | dict2items | map('combine', {'backend': item.item.name}) | list) }}
+  vars:
+    props:
       # server-ip is loopback on purpose: this backend must never be reachable
-      # from the network. Gate is the only thing that connects to it.
-      server-ip=127.0.0.1
-      server-port={{ item.port }}
+      # from the network. Gate is the only thing that connects to it, and RCON
+      # binds to the same address.
+      server-ip: "127.0.0.1"
+      server-port: "{{ item.item.port }}"
 
       # online-mode=false does NOT mean unauthenticated. It means this backend
       # delegates authentication to Gate and accepts only identities Gate has
       # signed, via the Velocity forwarding secret. Binding to loopback above is
       # what makes that safe.
-      online-mode=false
+      online-mode: "false"
 
-      white-list=true
-      enforce-whitelist=true
+      white-list: "true"
+      enforce-whitelist: "true"
 
-      motd=School Minecraft - {{ item.name }}
-      max-players={{ item.max_players | default(20) }}
-      view-distance={{ item.view_distance | default(10) }}
-      simulation-distance={{ item.simulation_distance | default(8) }}
-      spawn-protection=0
-      enable-command-block=false
-  loop: "{{ mc.backends }}"
+      motd: "School Minecraft - {{ item.item.name }}"
+      max-players: "{{ item.item.max_players | default(20) }}"
+      view-distance: "{{ item.item.view_distance | default(10) }}"
+      simulation-distance: "{{ item.item.simulation_distance | default(8) }}"
+      spawn-protection: "0"
+      enable-command-block: "false"
+
+      enable-rcon: "true"
+      rcon.port: "{{ item.item.rcon_port | default(item.item.port + 1000) }}"
+      rcon.password: "{{ item.content | b64decode | trim }}"
+      broadcast-rcon-to-ops: "false"
+  loop: "{{ rcon_password_raw.results }}"
+  no_log: true
+
+- name: Set the managed server.properties values on each backend
+  ansible.builtin.lineinfile:
+    path: "{{ mc_root }}/servers/{{ item.backend }}/server.properties"
+    regexp: "^{{ item.key | regex_escape }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+  loop: "{{ mc_property_lines | rejectattr('key', 'eq', 'rcon.password') | list }}"
   loop_control:
-    label: "{{ item.name }}"
+    label: "{{ item.backend }}: {{ item.key }}"
   notify: Restart Paper backends
+
+- name: Set the RCON password on each backend
+  ansible.builtin.lineinfile:
+    path: "{{ mc_root }}/servers/{{ item.backend }}/server.properties"
+    regexp: "^rcon\\.password="
+    line: "rcon.password={{ item.value }}"
+    create: true
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+  loop: "{{ mc_property_lines | selectattr('key', 'eq', 'rcon.password') | list }}"
+  no_log: true
+  notify: Restart Paper backends
+
+# Debian's own RCON client (conqp/rcon), so it is patched through apt like
+# everything else. The CLI is in `rcon`; `python3-rcon` alone is only the
+# library. It pulls in python3-gi for its GUI sibling, which is unused here.
+- name: Install the rconclt RCON client
+  ansible.builtin.apt:
+    name: rcon
+    state: present
+
+# One section per backend, so an operator runs `rconclt <backend> <command>`.
+# Root-only: it holds every backend's RCON password. The passwords are
+# alphanumeric by construction, which matters because configparser treats `%`
+# in a value as interpolation.
+- name: Write the rconclt server list
+  ansible.builtin.copy:
+    dest: /etc/rcon.conf
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      # Managed by ansible/tasks/server-roles/minecraft.yml.
+      {% for result in rcon_password_raw.results %}
+
+      [{{ result.item.name }}]
+      host = 127.0.0.1
+      port = {{ result.item.rcon_port | default(result.item.port + 1000) }}
+      passwd = {{ result.content | b64decode | trim }}
+      {% endfor %}
+  no_log: true
 
 - name: Ensure each backend has a config directory
   ansible.builtin.file:
@@ -348,22 +460,37 @@
   loop_control:
     label: "{{ item.name }}"
 
-- name: Configure Velocity modern forwarding on each backend
-  ansible.builtin.copy:
-    dest: "{{ mc_root }}/servers/{{ item.name }}/config/paper-global.yml"
-    owner: "{{ mc_user }}"
-    group: "{{ mc_user }}"
-    mode: "0640"
-    content: |
-      # Managed by ansible/tasks/server-roles/minecraft.yml.
-      proxies:
-        velocity:
-          enabled: true
-          online-mode: true
-          secret: "{{ forwarding_secret }}"
+- name: Read each backend's paper-global.yml, if Paper has written one
+  ansible.builtin.slurp:
+    src: "{{ mc_root }}/servers/{{ item.name }}/config/paper-global.yml"
   loop: "{{ mc.backends }}"
   loop_control:
     label: "{{ item.name }}"
+  register: paper_global_raw
+  failed_when: false
+  no_log: true
+
+# Merged into whatever Paper has written and compared as data, not text: Paper
+# re-serialises the file at startup in its own format, so a textual comparison
+# would never settle.
+- name: Configure Velocity modern forwarding on each backend
+  ansible.builtin.copy:
+    dest: "{{ mc_root }}/servers/{{ item.item.name }}/config/paper-global.yml"
+    owner: "{{ mc_user }}"
+    group: "{{ mc_user }}"
+    mode: "0640"
+    content: "{{ merged | to_nice_yaml(indent=2) }}"
+  vars:
+    existing: "{{ (item.content | b64decode | from_yaml) if item.content is defined else {} }}"
+    merged: >-
+      {{ existing | combine({'proxies': {'velocity': {
+           'enabled': true, 'online-mode': true, 'secret': forwarding_secret}}},
+         recursive=true) }}
+  when: merged != existing
+  loop: "{{ paper_global_raw.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  no_log: true
   notify: Restart Paper backends
 
 # Created only if absent. Rewriting it on every run would silently revoke every
