@@ -190,6 +190,18 @@
       when: server_status.rc != 0
       changed_when: server_clone.rc == 0
 
+    # Proxmox generates a random MAC for any netN spec that does not carry one
+    # (parse_net in PVE::QemuServer::Network), so setting net0 without the
+    # existing address would hand an already-provisioned server a new NIC -- and,
+    # on DHCP, very likely a new IP -- on every re-run. Carry the MAC forward.
+    - name: Read the existing net0 MAC address
+      ansible.builtin.shell: >
+        qm config {{ server_def.vmid }} | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]\{17\}\),.*/\1/p'
+      args:
+        executable: /bin/bash
+      register: current_net0_mac
+      changed_when: false
+
     - name: Apply the server's resource shape
       ansible.builtin.command:
         argv:
@@ -209,7 +221,8 @@
           - --onboot
           - "{{ 1 if (server_def.onboot | default(true) | bool) else 0 }}"
           - --net0
-          - "virtio,bridge={{ server_def.bridge }},firewall=1"
+          - >-
+            virtio{{ '=' ~ (current_net0_mac.stdout | trim) if (current_net0_mac.stdout | trim | length > 0) else '' }},bridge={{ server_def.bridge }},firewall=1
           - --ipconfig0
           - "{{ server_def.ipconfig0 | default('ip=dhcp') }}"
           - --ciuser
