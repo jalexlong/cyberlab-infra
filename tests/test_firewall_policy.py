@@ -442,3 +442,24 @@ def test_cyberlab_only_playbooks_end_on_other_nodes(name):
     first = next(iter_tasks(play))
     assert task_module(first, "meta") == "end_host", f"{name} does not open with the node gate"
     assert "cyberlab_nodes" in str(first.get("when", ""))
+
+
+@pytest.mark.parametrize(
+    ("source", "admitted"),
+    [("10.64.62.74", 0), ("10.60.1.5", 0), ("::ffff:10.64.63.1", 0), ("192.0.2.7", 1), ("10.64.64.1", 1)],
+)
+def test_lockout_guard_snippet_admits_by_network(source, admitted):
+    """Runs the guard's own Python with the argv shape the task passes: the
+    networks as ONE space-joined argument. On 2026-10-02 it read them as
+    separate arguments, raised, and refused the controller's own address."""
+    import subprocess
+    import sys
+
+    task = next(
+        t for play in load_playbook(BOOTSTRAP) for t in iter_tasks(play)
+        if t.get("name") == "Require that address to be a management source"
+    )
+    argv = task_module(task, "command")["argv"]
+    code = argv[2]
+    result = subprocess.run([sys.executable, "-c", code, source, "10.64.62.0/23 10.60.0.0/22"])
+    assert result.returncode == admitted

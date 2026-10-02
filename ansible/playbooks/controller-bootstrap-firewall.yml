@@ -306,11 +306,14 @@
             src = ipaddress.ip_address(sys.argv[1])
             if src.version == 6 and src.ipv4_mapped:
                 src = src.ipv4_mapped
-            sys.exit(0 if any(src in ipaddress.ip_network(n) for n in sys.argv[2:]) else 1)
+            nets = [ipaddress.ip_network(n) for n in sys.argv[2].split()]
+            sys.exit(0 if any(src in n for n in nets) else 1)
           - "{{ runner_source.stdout | trim }}"
           - "{{ management_sources | join(' ') }}"
       register: runner_admitted
-      failed_when: false
+      # 1 is "outside", reported by the assert below. Anything else is the
+      # check itself breaking, which must not read as either answer.
+      failed_when: runner_admitted.rc not in [0, 1]
       changed_when: false
       check_mode: false
       when:
