@@ -6,6 +6,16 @@ environment:
     api_host: "10.64.62.200"
     default_node: "pve1"
 
+    # Where the node's SSH and web UI admit connections from: the wired
+    # building LAN and the school wireless. Whole subnets, because every
+    # administrator address is DHCP with no reservations. Read by
+    # controller-bootstrap-firewall.yml (the management IP set) and
+    # host-hardening.yml (sshd and pveproxy), so all three layers admit the
+    # same networks. Absent or empty leaves the firewall unscoped.
+    management_sources:
+      - "10.64.62.0/23"
+      - "10.60.0.0/22"
+
   sections:
     jlong-icsa1:
       proxmox_node: "pve1"

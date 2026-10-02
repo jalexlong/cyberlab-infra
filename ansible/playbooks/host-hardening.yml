@@ -1,0 +1,516 @@
+---
+# Harden the cyberlab node itself: unused services, SSH, the web UI's own
+# source filter, and fail2ban. Ported from school-services-infra's
+# host-hardening.yml, which did the same to pve2 on 2026-09-29. See
+# docs/host-hardening.md.
+#
+# Run from the administrator's workstation, NOT from controller CT 800: the
+# checks that disarm the dead-man switch log in from the workstation over each
+# of its management networks, and check jlong's key through its ssh-agent.
+#
+#   ansible-playbook -i inventory-platform.yml playbooks/host-hardening.yml \
+#     -e ansible_ssh_private_key_file=~/.ssh/claude-key --tags services
+#   ansible-playbook -i inventory-platform.yml playbooks/host-hardening.yml \
+#     -e ansible_ssh_private_key_file=~/.ssh/claude-key --tags access
+#   ansible-playbook -i inventory-platform.yml playbooks/host-hardening.yml \
+#     -e ansible_ssh_private_key_file=~/.ssh/claude-key --tags fail2ban
+#
+# Wired and wireless at once is the normal case (verify_min_paths=2). On one
+# network only, pass -e verify_min_paths=1 and accept that the other path is
+# unchecked.
+#
+# The `access` part changes how anyone logs in -- key-only SSH, restricted to
+# the management networks, and the same restriction on the web UI -- so it
+# sits behind a dead-man switch. A timer on the node removes both changes after
+# deadman_minutes unless this run disarms it, which it does only after
+# checking that root (by the run's key) and jlong (by the key in ssh-agent)
+# can still log in over every management path, that passwords are refused,
+# that the web UI answers, and that controller CT 800 still reaches the node's
+# SSH and API.
+#
+# The verification half of `access` runs on every run, not only when
+# something changed: a run that finds nothing new to change must still verify
+# and disarm a switch an earlier, interrupted run left armed.
+#
+# Deliberately absent, unlike pve2's: account cleanup. pve1's users, groups,
+# pools and the automation token are the cyberlab's live data model, not
+# leftovers.
+
+- name: Harden the cyberlab node
+  hosts: all
+  gather_facts: false
+
+  vars:
+    cyberlab_env: school-lab
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    cyberlab_nodes: >-
+      {{
+        ([environment_data.environment.proxmox.default_node]
+         + (environment_data.environment.sections | default({})).values()
+           | map(attribute='proxmox_node') | list)
+        | unique | list
+      }}
+    mgmt: "{{ environment_data.environment.proxmox.management_sources | default([]) }}"
+
+    # The only accounts sshd accepts, and only by key. root is the
+    # controller's and break-glass; jlong is the administrator's.
+    ssh_users: [root, jlong]
+
+    controller_ctid: 800
+    controller_ssh_key: /root/.ssh/id_ed25519_controller
+
+    sshd_dropin: /etc/ssh/sshd_config.d/10-cyberlab.conf
+    pveproxy_defaults: /etc/default/pveproxy
+    staging: /root/cyberlab-hardening
+    deadman_minutes: 10
+    verify_min_paths: 2
+
+  tasks:
+    - name: End the play on nodes that do not run this environment
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in cyberlab_nodes
+      tags: [always]
+
+    - name: Require management networks to be declared
+      ansible.builtin.assert:
+        that:
+          - mgmt | length > 0
+        fail_msg: >-
+          {{ environment_file }} has no proxmox.management_sources. Without
+          them this playbook would restrict SSH and the web UI to nowhere.
+      tags: [always]
+
+    # ------------------------------------------------------------------------
+    # Services that should not be listening
+    # ------------------------------------------------------------------------
+    # rpcbind serves NFS. It listened on 0.0.0.0:111 (found 2026-09-29). It is
+    # masked only once the node is shown not to use NFS, as client or server.
+    - name: Look for NFS storage or exports
+      ansible.builtin.shell: |
+        grep -E '^nfs:' /etc/pve/storage.cfg || true
+        grep -Ev '^\s*(#|$)' /etc/exports 2>/dev/null || true
+      register: nfs_use
+      changed_when: false
+      tags: [services]
+
+    - name: Refuse to mask rpcbind on a node that uses NFS
+      ansible.builtin.assert:
+        that:
+          - nfs_use.stdout | trim | length == 0
+        fail_msg: "This node uses NFS, which needs rpcbind: {{ nfs_use.stdout_lines }}"
+      tags: [services]
+
+    - name: Stop and mask rpcbind
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop: [rpcbind.socket, rpcbind.service]
+      tags: [services]
+
+    # ------------------------------------------------------------------------
+    # Access: SSH and the web UI, behind the dead-man switch
+    # ------------------------------------------------------------------------
+    - name: Require every SSH user to exist
+      ansible.builtin.command:
+        argv: [getent, passwd, "{{ item }}"]
+      loop: "{{ ssh_users }}"
+      changed_when: false
+      tags: [access]
+
+    - name: Render the sshd drop-in and pveproxy defaults
+      ansible.builtin.set_fact:
+        sshd_dropin_content: |
+          # Managed by cyberlab-infra playbooks/host-hardening.yml.
+          # Debian includes sshd_config.d/ at the top of sshd_config, and for
+          # most options the first value read wins, so these override it.
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin prohibit-password
+          AllowUsers {{ ssh_users | join(' ') }}
+
+          # Nobody, from anywhere outside the management networks.
+          Match Address *,{{ mgmt | map('regex_replace', '^', '!') | join(',') }},!127.0.0.0/8
+              DenyUsers *
+        pveproxy_content: |
+          # Managed by cyberlab-infra playbooks/host-hardening.yml.
+          # The web UI (8006) and SPICE proxy (3128) admit only the management
+          # networks: an application-level layer independent of the firewall.
+          ALLOW_FROM="{{ mgmt | join(',') }},127.0.0.1"
+          DENY_FROM="all"
+          POLICY="allow"
+      tags: [access]
+
+    - name: Read the installed sshd drop-in
+      ansible.builtin.slurp:
+        src: "{{ sshd_dropin }}"
+      register: sshd_current
+      failed_when: false
+      tags: [access]
+
+    - name: Read the installed pveproxy defaults
+      ansible.builtin.slurp:
+        src: "{{ pveproxy_defaults }}"
+      register: pveproxy_current
+      failed_when: false
+      tags: [access]
+
+    # /etc/default/pveproxy can carry certificate, cipher or listen settings.
+    # This playbook writes the whole file, so any such line would be lost;
+    # stop and say so rather than drop it.
+    - name: Refuse to overwrite pveproxy settings this playbook does not manage
+      ansible.builtin.assert:
+        that:
+          - foreign_lines | length == 0
+        fail_msg: >-
+          {{ pveproxy_defaults }} holds settings this playbook would delete:
+          {{ foreign_lines }}. Carry them into pveproxy_content first.
+      vars:
+        foreign_lines: >-
+          {{ (pveproxy_current.content | default('') | b64decode).splitlines()
+             | reject('match', '^[ \t]*(#|$)')
+             | reject('match', '^(ALLOW_FROM|DENY_FROM|POLICY)=')
+             | list }}
+      tags: [access]
+
+    - name: Decide whether access changes
+      ansible.builtin.set_fact:
+        sshd_changing: "{{ (sshd_current.content | default('') | b64decode) != sshd_dropin_content }}"
+        pveproxy_changing: "{{ (pveproxy_current.content | default('') | b64decode) != pveproxy_content }}"
+      tags: [access]
+
+    # jlong's login is checked through ssh-agent, since the key has a
+    # passphrase. Checked before anything is armed, so a missing key fails fast.
+    - name: Require a key to be loaded in ssh-agent for the jlong check
+      ansible.builtin.command:
+        argv: [ssh-add, -l]
+      delegate_to: localhost
+      register: agent_keys
+      failed_when: agent_keys.rc != 0
+      changed_when: false
+      when: sshd_changing or pveproxy_changing
+      tags: [access]
+
+    - name: Clear any earlier dead-man switch
+      ansible.builtin.systemd_service:
+        name: cyberlab-access-deadman.timer
+        state: stopped
+      failed_when: false
+      when: sshd_changing or pveproxy_changing
+      tags: [access]
+
+    - name: Arm the dead-man switch
+      ansible.builtin.shell: |
+        set -e
+        mkdir -p {{ staging }}/rollback
+        chmod 700 {{ staging }}
+        rm -f {{ staging }}/rollback/pveproxy
+        if [ -f {{ pveproxy_defaults }} ]; then cp {{ pveproxy_defaults }} {{ staging }}/rollback/pveproxy; fi
+        systemd-run --unit=cyberlab-access-deadman --on-active={{ deadman_minutes }}m \
+          /bin/sh -c 'rm -f {{ sshd_dropin }}; systemctl reload ssh;
+            if [ -f {{ staging }}/rollback/pveproxy ]; then cp {{ staging }}/rollback/pveproxy {{ pveproxy_defaults }};
+            else rm -f {{ pveproxy_defaults }}; fi;
+            systemctl restart pveproxy spiceproxy;
+            logger -t cyberlab "dead-man switch fired: ssh and pveproxy access rolled back"'
+      changed_when: true
+      when: sshd_changing or pveproxy_changing
+      tags: [access]
+
+    # An invalid config can stop sshd on reload, so the drop-in is checked
+    # inside a copy of the whole configuration before it goes anywhere near the
+    # live one: sshd_config with its Include pointed at a staging directory.
+    - name: Stage the sshd drop-in in a test configuration
+      ansible.builtin.shell: |
+        set -e
+        T={{ staging }}/sshd-test
+        rm -rf "$T"; mkdir -p "$T/d"
+        sed "s#^Include /etc/ssh/sshd_config.d/\*.conf#Include $T/d/*.conf#" /etc/ssh/sshd_config > "$T/sshd_config"
+        grep -q "^Include $T/d/" "$T/sshd_config"
+        cp /etc/ssh/sshd_config.d/*.conf "$T/d/" 2>/dev/null || true
+        cat > "$T/d/{{ sshd_dropin | basename }}" <<'EOF'
+        {{ sshd_dropin_content }}EOF
+        sshd -t -f "$T/sshd_config"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: sshd_changing
+      tags: [access]
+
+    - name: Install the sshd drop-in
+      ansible.builtin.copy:
+        dest: "{{ sshd_dropin }}"
+        content: "{{ sshd_dropin_content }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: sshd_changing
+      tags: [access]
+
+    - name: Check the whole sshd configuration
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      changed_when: false
+      tags: [access]
+
+    # reload, not restart: existing sessions survive.
+    - name: Reload sshd
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded
+      when: sshd_changing
+      tags: [access]
+
+    - name: Install the pveproxy source filter
+      ansible.builtin.copy:
+        dest: "{{ pveproxy_defaults }}"
+        content: "{{ pveproxy_content }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: pveproxy_changing
+      tags: [access]
+
+    - name: Restart the web UI and SPICE proxy
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+      loop: [pveproxy, spiceproxy]
+      when: pveproxy_changing
+      tags: [access]
+
+    - name: Wait for the web UI to come back
+      ansible.builtin.wait_for:
+        port: 8006
+        timeout: 60
+      when: pveproxy_changing
+      tags: [access]
+
+    # Checked on the node itself, from 127.0.0.2: a loopback address, so no
+    # packet leaves the node, but not the 127.0.0.1 that ALLOW_FROM admits.
+    - name: Require the web UI to refuse a non-management source
+      ansible.builtin.command:
+        argv: [curl, -sk, -o, /dev/null, -w, "%{http_code}", --interface, "127.0.0.2", -m, "10", "https://127.0.0.1:8006"]
+      register: pveproxy_negative
+      # pveproxy turns a disallowed source away by closing the connection
+      # during the TLS handshake (curl exit 35), not with an HTTP status;
+      # anything but a 200 is a refusal (measured on pve2 2026-09-29).
+      failed_when: pveproxy_negative.stdout == '200'
+      changed_when: false
+      tags: [access]
+
+    # The controller drives this node over SSH as root and over the API. Both
+    # must survive, from wherever CT 800's address is.
+    - name: Check the controller still logs in to the node
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ controller_ctid }}", --, ssh, -i, "{{ controller_ssh_key }}", -o, IdentitiesOnly=yes,
+               -o, BatchMode=yes, -o, ConnectTimeout=10, "root@{{ ansible_host }}", "true"]
+      changed_when: false
+      tags: [access]
+
+    - name: Check the controller still reaches the API
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ controller_ctid }}"
+          - --
+          - python3
+          - -c
+          - |
+            import ssl, sys, urllib.request
+            ctx = ssl._create_unverified_context()
+            print(urllib.request.urlopen(sys.argv[1], context=ctx, timeout=10).status)
+          - "https://{{ ansible_host }}:8006"
+      register: controller_api
+      failed_when: controller_api.rc != 0 or controller_api.stdout | trim != '200'
+      changed_when: false
+      tags: [access]
+
+    - name: Find this workstation's interfaces inside a management network
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress, re, subprocess, sys
+            nets = [ipaddress.ip_network(n) for n in sys.argv[1].split()]
+            iface = None
+            for line in subprocess.run(['ifconfig'], capture_output=True, text=True).stdout.splitlines():
+                m = re.match(r'^(\w+):', line)
+                if m:
+                    iface = m.group(1)
+                m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
+                if m and any(ipaddress.ip_address(m.group(1)) in n for n in nets):
+                    print(iface)
+          - "{{ mgmt | join(' ') }}"
+      delegate_to: localhost
+      register: local_ifaces
+      changed_when: false
+      tags: [access]
+
+    - name: Require enough management paths to verify over
+      ansible.builtin.assert:
+        that:
+          - local_ifaces.stdout_lines | length >= verify_min_paths | int
+        fail_msg: >-
+          Only {{ local_ifaces.stdout_lines }} available; {{ verify_min_paths }}
+          required. The dead-man switch rolls back in {{ deadman_minutes }} minutes.
+      tags: [access]
+
+    - name: Check root logs in by key over each path
+      ansible.builtin.command:
+        argv: [ssh, -o, "BindInterface={{ item }}", -i, "{{ ansible_ssh_private_key_file }}", -o, IdentitiesOnly=yes,
+               -o, BatchMode=yes, -o, ConnectTimeout=10, "root@{{ ansible_host }}", "true"]
+      loop: "{{ local_ifaces.stdout_lines }}"
+      delegate_to: localhost
+      changed_when: false
+      tags: [access]
+
+    - name: Check jlong logs in by the key in ssh-agent over each path
+      ansible.builtin.command:
+        argv: [ssh, -o, "BindInterface={{ item }}", -o, BatchMode=yes, -o, ConnectTimeout=10,
+               "jlong@{{ ansible_host }}", "true"]
+      loop: "{{ local_ifaces.stdout_lines }}"
+      delegate_to: localhost
+      changed_when: false
+      tags: [access]
+
+    - name: Check passwords are refused
+      ansible.builtin.command:
+        argv: [ssh, -o, PubkeyAuthentication=no, -o, "PreferredAuthentications=password,keyboard-interactive",
+               -o, BatchMode=yes, -o, ConnectTimeout=10, "jlong@{{ ansible_host }}", "true"]
+      delegate_to: localhost
+      register: password_check
+      failed_when: >-
+        password_check.rc == 0 or
+        'Permission denied (publickey)' not in password_check.stderr
+      changed_when: false
+      tags: [access]
+
+    - name: Check the web UI over each path
+      ansible.builtin.command:
+        argv: [curl, -sk, -o, /dev/null, -w, "%{http_code}", --interface, "{{ item }}", -m, "10", "https://{{ ansible_host }}:8006"]
+      loop: "{{ local_ifaces.stdout_lines }}"
+      delegate_to: localhost
+      register: ui_checks
+      failed_when: ui_checks.stdout != '200'
+      changed_when: false
+      tags: [access]
+
+    - name: Disarm the dead-man switch
+      ansible.builtin.systemd_service:
+        name: cyberlab-access-deadman.timer
+        state: stopped
+      failed_when: false
+      tags: [access]
+
+    # ------------------------------------------------------------------------
+    # fail2ban: repeated failed web UI logins
+    # ------------------------------------------------------------------------
+    # The wireless management network is shared with students, so the web UI
+    # login is exposed to guessing from inside the allowlist. pvedaemon logs
+    # each failure as
+    #   authentication failure; rhost=::ffff:192.0.2.7 user=... msg=...
+    # with an IPv4-mapped address, which the filter must allow for (measured
+    # on pve2 2026-09-29).
+    - name: Install fail2ban
+      ansible.builtin.apt:
+        name: [fail2ban, python3-systemd]
+        state: present
+      tags: [fail2ban]
+
+    # Bookworm's packaged sshd jail reads /var/log/auth.log, which a
+    # journald-only host does not have, and fail2ban then refuses to start.
+    # Harmless on trixie, whose default is already systemd.
+    - name: Point the sshd jail at the journal
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/sshd-systemd.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by cyberlab-infra playbooks/host-hardening.yml.
+          [sshd]
+          backend = systemd
+      register: f2b_sshd
+      tags: [fail2ban]
+
+    - name: Write the Proxmox web UI filter
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/filter.d/proxmox.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by cyberlab-infra playbooks/host-hardening.yml.
+          [Definition]
+          failregex = authentication (?:verification )?failure; rhost=(?:::ffff:)?<HOST> user=\S+ msg=.*$
+          ignoreregex =
+          journalmatch = _SYSTEMD_UNIT=pvedaemon.service
+      register: f2b_filter
+      tags: [fail2ban]
+
+    # Fifteen minutes, not hours: an administrator who mistypes five times is
+    # locked out of the web UI from that address only briefly, and can switch
+    # between the wired and wireless networks meanwhile.
+    - name: Write the Proxmox web UI jail
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/proxmox.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by cyberlab-infra playbooks/host-hardening.yml.
+          [proxmox]
+          enabled = true
+          port = https,http,8006
+          filter = proxmox
+          backend = systemd
+          maxretry = 5
+          findtime = 10m
+          bantime = 15m
+      register: f2b_jail
+      tags: [fail2ban]
+
+    - name: Run fail2ban
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        enabled: true
+        state: "{{ 'restarted' if (f2b_filter.changed or f2b_jail.changed or f2b_sshd.changed) else 'started' }}"
+      tags: [fail2ban]
+
+    # Tested against a line in pvedaemon's exact format rather than the
+    # journal, because a node nobody has mistyped a password on has no real
+    # failure to match, and the filter must be proven either way.
+    - name: Test the filter against a pvedaemon failure line
+      ansible.builtin.command:
+        argv:
+          - fail2ban-regex
+          - "2026-10-01 10:00:00 pvedaemon[1234]: authentication failure; rhost=::ffff:192.0.2.7 user=root@pam msg=no such user"
+          - /etc/fail2ban/filter.d/proxmox.conf
+      register: f2b_regex
+      changed_when: false
+      failed_when: >-
+        f2b_regex.rc != 0 or
+        (f2b_regex.stdout | regex_search('Lines: \\d+ lines, \\d+ ignored, (\\d+) matched', '\\1') | first | int) != 1
+      tags: [fail2ban]
+
+    - name: Read the jails
+      ansible.builtin.command:
+        argv: [fail2ban-client, status]
+      register: f2b_status
+      retries: 6
+      delay: 5
+      until: "'proxmox' in f2b_status.stdout"
+      changed_when: false
+      tags: [fail2ban]
+
+    - name: Report fail2ban
+      ansible.builtin.debug:
+        msg:
+          - "{{ f2b_status.stdout_lines | select('search', 'Jail list') | list }}"
+          - "{{ f2b_regex.stdout_lines | select('search', '^(Lines|Failregex):') | list }}"
+      tags: [fail2ban]

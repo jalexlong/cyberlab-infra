@@ -72,9 +72,25 @@
     repo_root: "{{ playbook_dir }}/../.."
     environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
     environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    cyberlab_nodes: >-
+      {{
+        ([environment_data.environment.proxmox.default_node]
+         + (environment_data.environment.sections | default({})).values()
+           | map(attribute='proxmox_node') | list)
+        | unique | list
+      }}
     env_sections: "{{ environment_data.environment.sections | default({}) }}"
 
     mgmt_address: "{{ environment_data.environment.proxmox.api_host }}"
+    management_sources: "{{ environment_data.environment.proxmox.management_sources | default([]) }}"
+
+    # With management_sources set, a mistake here can lock the operator out,
+    # so the host and datacenter policy are applied behind a dead-man switch:
+    # a timer on the node puts the previous files back after this many
+    # minutes unless the run disarms it, which it does only after opening a
+    # fresh SSH connection and reaching the web UI from where it runs.
+    deadman_minutes: 10
+    rollback_dir: /root/cyberlab-fw-rollback
 
     infra_subnets: "{{ proxmox_sdn.subnets | default([]) }}"
     prov_subnet: >-
@@ -117,6 +133,14 @@
       {{ out | unique | list | sort }}
 
   tasks:
+    # proxmox_targets also holds pve2, for the template pipeline only. pve2
+    # belongs to school-services-infra, which writes its own SDN and firewall,
+    # so a play like this one must never touch it. Only the nodes this
+    # environment names run the cyberlab.
+    - name: End the play on nodes that do not run this environment
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in cyberlab_nodes
+
     - name: Require the environment to declare at least one section
       ansible.builtin.assert:
         that:
@@ -257,6 +281,96 @@
           path the firewall never reads.
 
     # ---------------------------------------------------------------------
+    # Lockout guard, when management access is scoped.
+    #
+    # The address this run arrives from must be inside the management set, or
+    # the rules about to be written would cut off the run that writes them.
+    # SSH_CLIENT is that address as the node sees it, which is the one that
+    # matters: a controller in a container and a laptop on the wireless both
+    # show up here as themselves.
+    # ---------------------------------------------------------------------
+    - name: Read the address this run arrives from
+      ansible.builtin.shell: echo "${SSH_CLIENT%% *}"
+      register: runner_source
+      changed_when: false
+      check_mode: false
+      when: management_sources | length > 0
+
+    - name: Require that address to be a management source
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import ipaddress, sys
+            src = ipaddress.ip_address(sys.argv[1])
+            if src.version == 6 and src.ipv4_mapped:
+                src = src.ipv4_mapped
+            sys.exit(0 if any(src in ipaddress.ip_network(n) for n in sys.argv[2:]) else 1)
+          - "{{ runner_source.stdout | trim }}"
+          - "{{ management_sources | join(' ') }}"
+      register: runner_admitted
+      failed_when: false
+      changed_when: false
+      check_mode: false
+      when:
+        - management_sources | length > 0
+        - runner_source.stdout | trim | length > 0
+
+    - name: Fail when this run would lock itself out
+      ansible.builtin.assert:
+        that:
+          - runner_admitted.rc == 0
+        fail_msg: >-
+          This run reaches {{ node_name }} from {{ runner_source.stdout | trim }},
+          which is outside management_sources
+          ({{ management_sources | join(', ') }}). Writing these rules would
+          cut it off. Add the network to {{ environment_file }}, or run from
+          inside one.
+      when:
+        - management_sources | length > 0
+        - runner_source.stdout | trim | length > 0
+
+    - name: Keep a copy of the installed host and datacenter policy
+      ansible.builtin.shell: |
+        set -e
+        mkdir -p {{ rollback_dir }}
+        chmod 700 {{ rollback_dir }}
+        for f in /etc/pve/firewall/cluster.fw /etc/pve/nodes/{{ node_name }}/host.fw; do
+          b={{ rollback_dir }}/$(basename "$f")
+          if [ -f "$f" ]; then cp "$f" "$b"; else rm -f "$b"; touch "$b.absent"; fi
+        done
+      changed_when: false
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    - name: Clear any earlier dead-man switch
+      ansible.builtin.systemd_service:
+        name: cyberlab-fw-deadman.timer
+        state: stopped
+      failed_when: false
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    # Restores the two files, or removes one that did not exist before, then
+    # restarts the firewall so the old policy is in force at once.
+    - name: Arm the dead-man switch
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --unit=cyberlab-fw-deadman
+          - "--on-active={{ deadman_minutes }}m"
+          - /bin/sh
+          - -c
+          - >-
+            for pair in cluster.fw:/etc/pve/firewall/cluster.fw
+            host.fw:/etc/pve/nodes/{{ node_name }}/host.fw; do
+            b={{ rollback_dir }}/${pair%%:*}; f=${pair#*:};
+            if [ -f "$b.absent" ]; then rm -f "$f"; else cp "$b" "$f"; fi; done;
+            pve-firewall restart;
+            logger -t cyberlab "dead-man switch fired: host and datacenter firewall rolled back"
+      changed_when: true
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    # ---------------------------------------------------------------------
     # host.fw is written BEFORE cluster.fw, deliberately.
     #
     # cluster.fw is what sets `enable: 1`. Writing it first would switch
@@ -307,12 +421,22 @@
           IN DROP -source {{ supernet }} -log info # lab subnets never reach the host
           {% endfor %}
 
-          # Management access. Deliberately not scoped by source: the admin
-          # laptop moves between subnets, and scoping these to the school
-          # network would have locked the operator out on 2026-08-07.
+          {% if management_sources %}
+          # Management access, from the management IP set only. The admin
+          # laptop moves between the wired and wireless networks, so both are
+          # in the set as whole subnets (scoping to the wired one alone locked
+          # the operator out on 2026-08-07). Proxmox's built-in management
+          # accepts follow the same set once it exists.
+          IN SSH(ACCEPT) -source +dc/management -log nolog
+          IN ACCEPT -source +dc/management -p tcp -dport 8006 -log nolog # Proxmox Web UI
+          IN ACCEPT -source +dc/management -p icmp -log nolog
+          {% else %}
+          # Management access. Not scoped by source: no management_sources in
+          # {{ cyberlab_env }}.
           IN SSH(ACCEPT) -log nolog
           IN ACCEPT -p tcp -dport 8006 -log nolog # Proxmox Web UI
           IN ACCEPT -p icmp -log nolog
+          {% endif %}
 
           # Template builds on prov0 need DNS from the VNet gateway. prov0 is
           # factory-time infrastructure, not a student-facing network. Section
@@ -396,6 +520,14 @@
           provnet {{ prov_subnet }} # Factory-time provisioning network
           svcnet {{ svc_subnet }} # Site-time service network
           cache {{ cyberlab_cache_svc_ip }} # Package cache on svc0
+          {% if management_sources %}
+
+          [IPSET management] # where the node's SSH, web UI and SPICE are reached from
+
+          {% for net in management_sources %}
+          {{ net }}
+          {% endfor %}
+          {% endif %}
 
           [group lab-guest] # Default-deny lab guest. Carve-outs are unidirectional.
 
@@ -568,6 +700,33 @@
         success_msg: "pve-firewall is enabled and running."
       when: cyberlab_firewall_enable | bool
 
+    # A new connection, not the one this run has held open since before the
+    # change: conntrack would keep an established session alive through rules
+    # that refuse new ones.
+    - name: Drop the existing SSH connection
+      ansible.builtin.meta: reset_connection
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    - name: Check a fresh SSH connection is admitted
+      ansible.builtin.command:
+        argv: ["true"]
+      changed_when: false
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    - name: Check the web UI answers from where this run is
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:8006"
+        validate_certs: false
+        timeout: 10
+      delegate_to: localhost
+      when: management_sources | length > 0 and not ansible_check_mode
+
+    - name: Disarm the dead-man switch
+      ansible.builtin.systemd_service:
+        name: cyberlab-fw-deadman.timer
+        state: stopped
+      when: management_sources | length > 0 and not ansible_check_mode
+
     - name: Summarise what was written
       ansible.builtin.debug:
         msg:
@@ -576,6 +735,7 @@
           - "enforcing: {{ cyberlab_firewall_enable | bool }}"
           - "lab supernets dropped at the host: {{ lab_supernets | join(', ') }}"
           - "cache carve-out: {{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }} only"
+          - "management access from: {{ management_sources | join(', ') | default('anywhere (unscoped)', true) }}"
           - >-
             guests reconciled:
             {{ lab_nics | default([]) | map(attribute=0) | unique | list | sort | join(', ') | default('none', true) }}

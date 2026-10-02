@@ -55,6 +55,13 @@
     repo_root: "{{ playbook_dir }}/../.."
     environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
     environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    cyberlab_nodes: >-
+      {{
+        ([environment_data.environment.proxmox.default_node]
+         + (environment_data.environment.sections | default({})).values()
+           | map(attribute='proxmox_node') | list)
+        | unique | list
+      }}
     env_sections: "{{ environment_data.environment.sections | default({}) }}"
     mgmt_address: "{{ environment_data.environment.proxmox.api_host }}"
 
@@ -80,6 +87,14 @@
       }}
 
   tasks:
+    # proxmox_targets also holds pve2, for the template pipeline only. pve2
+    # belongs to school-services-infra, which writes its own SDN and firewall,
+    # so a play like this one must never touch it. Only the nodes this
+    # environment names run the cyberlab.
+    - name: End the play on nodes that do not run this environment
+      ansible.builtin.meta: end_host
+      when: inventory_hostname not in cyberlab_nodes
+
     # ===================================================================
     # Tier 1: configuration assertions.
     # ===================================================================

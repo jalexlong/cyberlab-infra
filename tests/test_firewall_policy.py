@@ -20,6 +20,7 @@ from conftest import PLAYBOOK_DIR, REPO_ROOT, iter_tasks, load_playbook, load_ya
 
 BOOTSTRAP = PLAYBOOK_DIR / "controller-bootstrap-firewall.yml"
 ASSERT_ISOLATION = PLAYBOOK_DIR / "controller-assert-isolation.yml"
+HARDENING = PLAYBOOK_DIR / "host-hardening.yml"
 PROBE_SCRIPT = REPO_ROOT / "scripts" / "isolation-probe.sh"
 INSTALLER = REPO_ROOT / "scripts" / "install-cyberlab.sh"
 ENVIRONMENTS = sorted((REPO_ROOT / "data" / "environments").glob("*.yml"))
@@ -274,7 +275,7 @@ def test_schoolnet_alias_is_guarded_by_a_conditional():
 
 @pytest.mark.parametrize(
     "path",
-    [BOOTSTRAP, ASSERT_ISOLATION, PROBE_SCRIPT],
+    [BOOTSTRAP, ASSERT_ISOLATION, PROBE_SCRIPT, HARDENING],
     ids=lambda p: p.name,
 )
 def test_no_site_specific_addresses_are_hardcoded(path):
@@ -394,3 +395,50 @@ def test_probe_requires_a_same_section_control():
         "isolation-probe.sh does not treat the control as pass/fail. A run "
         "where the control also failed proves nothing."
     )
+
+
+# ---------------------------------------------------------------------------
+# Management scoping and the node gate (2026-10-01).
+# ---------------------------------------------------------------------------
+def test_management_rules_are_scoped_only_when_sources_exist():
+    """With management_sources the SSH and 8006 accepts name the IP set; without
+    them they stay unscoped. A `+dc/management` reference with no IP set
+    behind it is a parse error that takes the whole firewall down."""
+    host_fw = _written_content(BOOTSTRAP, "host.fw")
+    cluster_fw = _written_content(BOOTSTRAP, "cluster.fw")
+    assert "{% if management_sources %}" in host_fw
+    assert "IN SSH(ACCEPT) -source +dc/management" in host_fw
+    assert "-source +dc/management -p tcp -dport 8006" in host_fw
+    ipset = cluster_fw.index("[IPSET management]")
+    assert re.search(r"{%-?\s*if\s+management_sources\s*-?%}\s*$", cluster_fw[:ipset]), (
+        "the management IP set is not guarded by `{% if management_sources %}`"
+    )
+
+
+def test_scoped_firewall_is_behind_a_dead_man_switch():
+    names = [task.get("name", "") for play in load_playbook(BOOTSTRAP) for task in iter_tasks(play)]
+    arm = names.index("Arm the dead-man switch")
+    write = names.index("Write the host firewall policy")
+    disarm = names.index("Disarm the dead-man switch")
+    guard = names.index("Fail when this run would lock itself out")
+    assert guard < arm < write < disarm
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "controller-bootstrap-firewall.yml",
+        "controller-bootstrap-sdn.yml",
+        "controller-bootstrap-package-cache.yml",
+        "controller-assert-isolation.yml",
+        "host-hardening.yml",
+    ],
+)
+def test_cyberlab_only_playbooks_end_on_other_nodes(name):
+    """proxmox_targets also holds pve2 for the template pipeline. pve2 belongs
+    to school-services-infra; a play that writes SDN or firewall policy must
+    end there before its first real task."""
+    play = load_playbook(PLAYBOOK_DIR / name)[0]
+    first = next(iter_tasks(play))
+    assert task_module(first, "meta") == "end_host", f"{name} does not open with the node gate"
+    assert "cyberlab_nodes" in str(first.get("when", ""))
