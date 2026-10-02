@@ -6,8 +6,21 @@ source the firewall let through, rpcbind listened on `0.0.0.0:111`, and no
 account had two-factor. pve2 was hardened that day by `school-services-infra`;
 this brings pve1 to the same standard.
 
-**Status: written 2026-10-01, not yet applied.** The repository work was done
-off site; everything below needs a wired and a wireless connection on campus.
+**Status: applied 2026-10-02, except two-factor (step 4), which is by hand.**
+
+- Firewall from CT 800 (`10.64.62.74`): the `--check --diff` showed only the
+  three management rules and the new IP set; applied, a fresh SSH connection
+  and the web UI verified, switch disarmed. Tier 1 of
+  `controller-assert-isolation.yml` passed afterwards. Tier 2 was not run
+  (guests 950/955 stopped; only host rules changed).
+- `host-hardening.yml` from the laptop over wired (`en5`) and wireless
+  (`en0`): rpcbind masked (no NFS found); sshd and pveproxy changed and every
+  check passed, including CT 800's SSH and API and the loopback refusal;
+  fail2ban running with the `proxmox` and `sshd` jails, and the filter matched
+  its test line. A full re-run reported `changed=0`.
+- The first `--check` run caught a bug in the firewall playbook's lockout
+  guard, which refused the controller's own address. It failed closed and
+  wrote nothing; fixed in `0b349e1`, with a test that runs the check itself.
 
 ---
 
