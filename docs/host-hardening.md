@@ -113,7 +113,7 @@ rather than fixing by hand.
 
 - **Locked out of SSH and the web UI from both networks:** wait 10 minutes for
   the dead-man switch. If it already disarmed, the iDRAC console
-  (`idrac-f8m4282`, see school-services-infra `docs/idrac-hardening.md`) is the
+  (`idrac-f8m4282`; its hardening is written up in the school-services-infra repository, under docs, "iDRAC hardening") is the
   way in; remove `/etc/ssh/sshd_config.d/10-cyberlab.conf` and
   `/etc/default/pveproxy`, then restart `ssh` and `pveproxy`.
 - **The controller can no longer reach pve1:** CT 800's address is outside the
