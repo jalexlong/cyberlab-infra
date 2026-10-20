@@ -1236,6 +1236,11 @@ wants a hand on the cable.
 - A template build's `apt` traffic demonstrably passes *through* the cache —
   verified from the cache's own hit/miss counters, not from the build merely
   succeeding, which it would do either way.
+  **Met 2026-10-20, measured from the cache's own disk rather than its
+  counters.** The cache grew from 58 MB / 45 files to 85 MB / 72 files during
+  the template `900` build, and a lab clone with no other route out then
+  installed `nmap` through it (92 MB / 82 files). The build guest is also
+  configured so it has no other way to fetch.
 - **A lab guest completes `apt-get update` and an install with the host's
   uplink physically unplugged.** Pulling the cable is the only version of this
   test that cannot pass for the wrong reason; a wrong rule or a stale route
@@ -1291,6 +1296,10 @@ wants a hand on the cable.
   completing a full install through the cache after a cold boot. The path is
   now demonstrably there; what has not been done is pushing real package
   volume down it.
+
+  **2026-10-20:** real package volume has now gone down it: a firewalled
+  section clone installed `nmap` through the cache. That was on a warm host, so
+  the only step left is the same install straight after a cold boot.
 
 **What this reduces the district ask to.** With the cache seeded and the
 firewall enforcing isolation, the appliance needs exactly one thing from a

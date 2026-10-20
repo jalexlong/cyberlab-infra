@@ -1,13 +1,43 @@
-# Handoff — the cache item is done; Phase 0 and the cable pull are next
+# Handoff — the cache item is done; next session starts at "Start here"
 
 Continuing work in `/Users/jlong/Code/cyberlab-infra`. The 2026-09-24 session
 ported the template pipeline to `pve2`, added a server-provisioning layer above
 it, and built a live Minecraft server on top of that. It also narrowed the
 project's scope and corrected three things the previous handoff had wrong.
 
-**Updated 2026-10-20:** the cache item is done and proven with a real clone.
-See "Done 2026-10-20" below. The current-state section is still the 09-24
-measurement except where that section says otherwise.
+**Updated 2026-10-20, end of session:** the cache item is done and proven with a
+real clone. The current-state section below is re-measured as of that date.
+**Next session: read "Start here" first.**
+
+## Start here — next session
+
+Nothing is running or half-done. No dead-man timer is armed, and 950/955 and
+900 are stopped. Pick from this list, which is grouped by what each item needs:
+
+1. **You alone, about 5 minutes: TOTP** for `root@pam` and `jlong@pam` in pve1's
+   web UI. It needs your phone.
+2. **Your decision, then remote work:**
+   - **CT 800 → pve2 host key.** The recommendation is to trust pve2's host key
+     in CT 800, not to drop pve2 from the inventory. This repo still builds
+     pve2's `debian13-pve2` template until `school-services-infra` takes that
+     over. The fix ends the exit 4 on every pipeline run.
+   - **When to delete the old template backup** (path below).
+3. **Remote and safe, can start immediately:**
+   - **Item 9:** measure per-VM and per-LXC RAM on pve1, then right-size
+     `slots.yml`. It is read-only, but needs a pod running for a while to give
+     a real number.
+   - **Phase 2's remaining templates, Juice Shop and Metasploitable3.** The
+     pipeline works on pve1 again; it was broken 08-07 to 10-20.
+4. **Needs you at the hardware. Do these in one visit, outside class time,
+   after the network rebuild if that is close:**
+   - **Cold boot:** reboot pve1, then confirm a clone can still install a
+     package through the cache.
+   - **Item 8: pull the cable.**
+5. **Blocked on wipeable hardware: item 7**, two `install-cyberlab.sh` runs.
+   This closes Phase 0.
+
+The recommended order is 1-2, then item 9, then the hardware visit, then the
+Phase 2 templates.
 
 ## Scope changed on 2026-09-24
 
@@ -37,30 +67,24 @@ because the inventory hardcodes the controller's path:
 `host-bootstrap.yml` is still the exception: it targets `proxmox_hosts`, which is
 `localhost` with `ansible_connection: local`, so it runs ON the node.
 
-## Current state — measured 2026-09-24 unless noted
+## Current state — measured 2026-10-20 unless noted
 
-- `main` and `origin/main` are at **`cbac901`**. The feature branch is merged and
-  deleted, locally and on origin.
-- **The on-host checkouts are current.** `/root/cyberlab-infra` on `pve1` and
-  CT `800`'s copy are both at `cbac901`, both clean, fast-forwarded 2026-09-24.
-  They were five commits behind until then. CT `800` now carries the server
-  catalog, both role task files and the discovery script, so the installer path
-  can provision servers — and all four of its playbooks parse on its own
-  `ansible-core 2.19.4`. **These drift silently and have twice been the thing
-  that quietly broke an installer run; `git log -1` in the controller before
-  trusting one.**
-- Baseline: **505 collected tests**, all passing, plus `ruff`, `yamllint`,
-  `shellcheck` and `ansible-lint` — the last at 0 failures / 0 warnings over 45
-  files, `production` profile passing where only `basic` is required. Up from
-  467/41 on 08-20.
-- `pve1`: cache at **58 MB / 45 files** — still warming only by accident, up one
-  file in a month. `chrony` Stratum 4, Leap Normal. CT `801` still has `net1`
-  attached.
+- `main` and `origin/main` are at **`1fd3e75`**, and the working tree is clean.
+- **All three checkouts are at `1fd3e75`:** the laptop, `/root/cyberlab-infra`
+  on `pve1`, and CT `800`'s copy. **These drift silently and have twice been the
+  thing that quietly broke an installer run; `git log -1` in the controller
+  before trusting one.**
+- Baseline: **508 tests**, all passing, plus `ruff`, `yamllint`, `shellcheck`
+  and `ansible-lint`, all clean before every push this session.
+- `pve1` cache: **92 MB / 82 files**. It is now seeded on purpose by template
+  builds, not only by accident. CT `801` still has `net1` attached, which is
+  what the seeding path uses.
+- `pve1` guests: `900` (the new cache-build template), `950`/`955` (isolation
+  probes), and `9001`-`9004` (older templates), all stopped.
+- Isolation: **17/17, re-measured 2026-10-20**, both tiers.
 - **Both hosts rebooted unplanned around 2026-09-11.** Not a test — a site power
   event. The cache came back on its own with no hand-holding, which is better
   evidence for the reboot fix than the deliberate 08-19 cold boot was.
-- Isolation: **17/17 carried forward from 2026-08-19, not re-measured this
-  session.** Treat it as a claim needing re-verification, per the trap below.
 
 ### Three corrections to the previous handoff
 
@@ -140,19 +164,9 @@ Two defects, both dating from the 2026-08-07 firewall, both fixed:
   `unsafe_writes` does not fix it. Policy is now staged under
   `/root/cyberlab-fw-staging` and installed with a compare and `cat >`.
 
-## Then, in rough order of value
+## Then
 
-- **TOTP for `root@pam` and `jlong@pam`** in pve1's web UI. Still not enrolled.
-- **Item 7 — two `install-cyberlab.sh` runs on wiped hardware** to close Phase 0.
-  Needs hardware you are willing to wipe. Now also proves the single build-type
-  switch.
-- **Item 8 — pull the cable.** The physical air-gap test, now on a real image.
-- **Item 9 — measure per-VM/per-LXC RAM on the R730** and right-size `slots.yml`.
-- **CT `800` cannot reach `pve2`** (`Host key verification failed`), so every
-  template pipeline run ends with exit 4 even when pve1 succeeds. Read the
-  recap, not the exit code. Either trust pve2's host key in CT 800 or drop pve2
-  from the controller's inventory now that pve2 belongs to
-  `school-services-infra`.
+See "Start here" at the top. It replaced this list on 2026-10-20.
 
 ## Incoming — network rebuild, roughly October 2026
 
@@ -179,7 +193,7 @@ Measured constraints worth not rediscovering:
 ## Traps worth knowing
 
 - **The on-host checkouts drift silently.** Twice now. `git log -1` in CT `800`
-  before trusting an installer run. Current as of 2026-09-24.
+  before trusting an installer run. Current as of 2026-10-20.
 - **`pct exec` passes no locale, and Ansible dies on that.** Hand-running
   `pct exec 800 -- ansible-playbook ...` fails every playbook with
   `could not initialize the preferred locale: unsupported locale setting` —
@@ -198,6 +212,18 @@ Measured constraints worth not rediscovering:
   Re-verify; don't carry the claim forward.
 - **"Does it answer" is not "did it reboot."** Gate on `/proc/uptime` being small,
   not on connectivity.
+- **Nothing can `chmod 0600` inside `/etc/pve`.** pmxcfs refuses it, so
+  `ansible.builtin.copy` fails on any new or changed file there, even with
+  `unsafe_writes`. Stage the file elsewhere and install it with `cat >`, as the
+  firewall playbook now does.
+- **The host needs an explicit OUT rule for every VNet it opens connections
+  onto.** `policy_out: DROP` covers the host itself, and a missing rule looks
+  like a dead guest, not a firewall drop.
+- **A failed firewall run leaves `cyberlab-fw-deadman.timer` armed**, which rolls
+  the firewall back after 10 minutes. Check
+  `systemctl list-timers | grep deadman` after any failure.
+- **A background job's exit status can be the wrapper's.** Read the playbook's
+  recap line, not the shell's exit code.
 - **The test suite only inspects *tracked* files.** `test_repo_tidiness.py`
   collected 33 more tests the moment `scripts/discover-guest-ip.sh` was committed,
   and failed immediately. An untracked script is invisible to it.
