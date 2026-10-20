@@ -1214,6 +1214,14 @@ Worth keeping the `403` rather than configuring around it. A misconfigured
 image fails loudly at build time instead of silently bypassing the cache and
 appearing to work right up until the uplink goes away.
 
+**Seeding through real images, 2026-10-20.** The second criterion was
+first met by a hand-configured guest. It is now met by the pipeline itself:
+rebuilding template `900` took the cache from 58 MB / 45 files to 85 MB / 72,
+and a clone of that template on a section VNet installed `nmap` and took it to
+92 MB / 82. The clone had no other way out, since isolation re-measured 17/17
+the same day. Not yet shown on this template: an install after a cold boot of
+the host.
+
 **Exit criteria status:** the first three below are met. The fourth — the
 physical cable pull — is not, and was approximated by stripping the cache's
 own egress interface, which is strictly weaker. Both controls behaved
@@ -1844,12 +1852,17 @@ is the state that session left behind, then what is next.
    **seventeen of seventeen rows including the control**, with `package cache
    10.31.0.10:3142 reachable` from inside guest `950`. The repo-written firewall
    came back on its own. See `docs/testing.md` for the run record
-6. **Bake the cache client config into the template images.** The proxy line
-   *and* the rewrite of Debian 13's `https`/`mirror+file` sources to plain
-   `http`, in `controller-finalize-template-vm.yml`. Until then every lab guest
-   needs hand-configuring and the cache warms only by accident. This is what
-   makes the Phase 2.5 seeding claim true for real images rather than for one
-   hand-edited test guest
+6. ~~**Bake the cache client config into the template images.**~~ **— done
+   2026-10-20.** `controller-finalize-template-vm.yml` rewrites the sources to
+   plain `http`, runs the build's own `apt` through the cache's `prov0`
+   address, and ships a proxy line naming `10.31.0.10:3142`, all conditional
+   on `proxmox.package_cache` in the environment file. The installer reads the
+   same key, so the two build types cannot disagree. Rebuilding template `900`
+   moved the cache from 45 to 72 files; a clone on `t101c011`, firewalled as a
+   lab guest, then installed `nmap` and moved it to 82. The rebuild also found
+   two firewall defects that had blocked any template build or new lab guest
+   since 2026-08-07: the host could not reach `prov0`, and new per-guest
+   `.fw` files could not be written into pmxcfs. Both are fixed
 7. Run `install-cyberlab.sh` twice on wiped Proxmox hardware to close Phase 0.
    Now doubles as the proof that **both** the cache and the firewall are
    reproducible from the installer rather than hand-built artifacts that happen

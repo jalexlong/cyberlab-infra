@@ -1,13 +1,13 @@
-# Handoff — two projects now, and the cache item is still owed
+# Handoff — the cache item is done; Phase 0 and the cable pull are next
 
 Continuing work in `/Users/jlong/Code/cyberlab-infra`. The 2026-09-24 session
 ported the template pipeline to `pve2`, added a server-provisioning layer above
 it, and built a live Minecraft server on top of that. It also narrowed the
 project's scope and corrected three things the previous handoff had wrong.
 
-**The cache item this handoff's predecessor was named for is still open.** It
-was not worked on. Everything below the Minecraft section is inherited, still
-accurate, and still the highest-value cyberlab work.
+**Updated 2026-10-20:** the cache item is done and proven with a real clone.
+See "Done 2026-10-20" below. The current-state section is still the 09-24
+measurement except where that section says otherwise.
 
 ## Scope changed on 2026-09-24
 
@@ -102,90 +102,57 @@ new repository.
 `zpool remove` and its two SSDs (bays 7 and 8) moved to pve2 as the backup
 mirror. The pool is three mirrors, 5.44 TB, fully redundant; scrub clean.
 
-## Task 1 — bake the cache client config into the template images
+## Done 2026-10-20 — the cache item, and two firewall defects it uncovered
 
-Roadmap item 6. Unchanged and still the highest-value cyberlab work. The cache
-warms **only by accident** — the 58 MB in it came from one hand-edited test
-guest, not from normal use.
+**Task 1 (roadmap item 6) is done.** `controller-finalize-template-vm.yml`
+rewrites Debian 13's sources to plain `http`, runs the build's own `apt` through
+the cache's `prov0` address (`10.30.0.20`) so building a template seeds the
+cache, and ships `/etc/apt/apt.conf.d/90cyberlab-package-cache` naming
+`10.31.0.10:3142`. A verification step refuses to shut the guest down if its apt
+config does not match its build type.
 
-The work goes in `controller-finalize-template-vm.yml`, in the
-`Finalize guest over SSH` heredoc. **It has two halves and neither is sufficient
-alone** — measured, not theoretical:
+**The build type is one key: `proxmox.package_cache` in the environment file.**
+Finalize reads it, `install-cyberlab.sh` reads it before running anything, and
+the cache playbook refuses to build without it. `--with-package-cache` now only
+asserts that the environment agrees. The cache addresses live once, in
+`ansible/group_vars/all.yml`.
 
-1. **The proxy line.** `controller-bootstrap-package-cache.yml` already prints
-   the exact string in its summary task:
+**Task 2 passed, short of a cold boot.** Template `900` was rebuilt through the full
+pipeline (validate stage skipped, since its VMID `950` is the isolation probe).
+Cache: 58 MB / 45 files before, 85 MB / 72 after the build. A clone on
+`t101c011`, firewalled as a lab guest, installed `nmap`; cache 92 MB / 82.
+Isolation re-measured the same day: **17/17**, both tiers. Not done: an install
+after a cold boot of the host.
 
-       Acquire::http::Proxy "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}";
+**The old template is backed up** at
+`/var/lib/vz/dump/vzdump-qemu-900-2026_10_20-13_16_09.vma.zst` on `pve1`.
+Delete it once the new one has seen some use.
 
-2. **The sources rewrite.** Debian 13's cloud image ships
-   `URIs: mirror+file:///etc/apt/mirrors/debian.list`, resolving to
-   `https://deb.debian.org`. `apt-cacher-ng` answers HTTPS with
-   `403 CONNECT denied`, and a CONNECT tunnel would be opaque to caching anyway.
-   **Measured: with the proxy set and https sources, `apt-get update` fails
-   outright and the cache stays at zero files.** Sources must become plain
-   `http://` with `mirror+file` replaced by a concrete host. With both halves
-   done, the same test cached 28 objects / 24 MB on first use.
+Two defects, both dating from the 2026-08-07 firewall, both fixed:
 
-   Dropping to `http` is not a downgrade — packages are GPG-signed and `apt`
-   verifies regardless of transport. `docs/roadmap.md` argues this at length;
-   read it before re-litigating.
-
-**Make it conditional**, per the two build types above. A template that
-unconditionally points at `10.31.0.10` breaks `apt` on every minimalist deploy.
-
-### Three things that will bite
-
-**Where the cache variables live.** `10.31.0.10` and `3142` are duplicated as
-playbook-local vars in *three* places — `controller-bootstrap-package-cache.yml`,
-`controller-bootstrap-firewall.yml`, `controller-assert-isolation.yml`. Nothing
-is in `group_vars/`. Promote them rather than adding a fourth copy.
-
-**Which address, and when.** The cache is dual-homed and the two addresses serve
-different eras:
-
-    net0  eth0  svc0   10.31.0.10    <- what lab guests use, forever
-    net1  eth1  prov0  10.30.0.20    <- factory-time seeding NIC, gets stripped
-
-The template build runs on `prov0`, so the guest doing the `apt-get install` sits
-at `10.30.0.x` and cannot necessarily route to `10.31.0.10` — yet `10.31.0.10` is
-the only address correct in a shipped image. **The build should use direct egress
-or `10.30.0.20`; the shipped image must carry `10.31.0.10`.** Write the cache
-config *after* the `apt-get install` steps.
-
-**The cleanup block is narrower than it looks.** It does
-`rm -f /etc/apt/apt.conf.d/99cyberlab-force-ipv4` — a specific filename, not a
-wildcard — so a drop-in named anything else survives automatically. The real
-constraint is only that the proxy must not be live during the build's own
-`apt-get`.
-
-`net1` on CT `801` is **still attached** (confirmed 2026-09-24), and there is a
-standing note to `pct set 801 --delete net1` before shipping. Note that stripping
-it removes the cache's only path to upstream mirrors.
-
-## Task 2 — prove it with a real clone
-
-The **restated Phase 2.5 exit criterion**: *a lab guest completes an install
-through the cache after a cold boot of the host.* The path is proven; the package
-volume has not been pushed down it.
-
-Take a before/after reading rather than trusting `is-active` — the cache has
-twice reported healthy while serving nobody:
-
-    pct exec 801 -- du -sh /var/cache/apt-cacher-ng                  # 58M
-    pct exec 801 -- find /var/cache/apt-cacher-ng -type f | wc -l    # 45
-
-Then clone a finalized template onto a section VNet, install something
-non-trivial, and confirm the file count moved. A guest that installs successfully
-but leaves the count unchanged went to the internet instead — that is a failure,
-and it is the failure mode the whole item exists to prevent.
+- **The host could not reach `prov0`.** `policy_out: DROP` covers the host, and
+  nothing allowed it onto `prov0`, so finalize timed out SSHing to a healthy
+  build guest. **No template could be built on `pve1` since 08-07**; the last
+  build was 08-05. Now tcp/22 and ICMP to `provnet` on `prov0` only.
+- **New per-guest `.fw` files could not be written.** pmxcfs refuses a chmod to
+  `0600`, which Ansible's `copy` applies on the way in, so any new lab guest
+  failed the firewall playbook with the dead-man switch left armed.
+  `unsafe_writes` does not fix it. Policy is now staged under
+  `/root/cyberlab-fw-staging` and installed with a compare and `cat >`.
 
 ## Then, in rough order of value
 
+- **TOTP for `root@pam` and `jlong@pam`** in pve1's web UI. Still not enrolled.
 - **Item 7 — two `install-cyberlab.sh` runs on wiped hardware** to close Phase 0.
-  Needs hardware you are willing to wipe. Fast-forward CT `800` first; it is five
-  commits stale again.
-- **Item 8 — pull the cable.** The physical air-gap test.
+  Needs hardware you are willing to wipe. Now also proves the single build-type
+  switch.
+- **Item 8 — pull the cable.** The physical air-gap test, now on a real image.
 - **Item 9 — measure per-VM/per-LXC RAM on the R730** and right-size `slots.yml`.
+- **CT `800` cannot reach `pve2`** (`Host key verification failed`), so every
+  template pipeline run ends with exit 4 even when pve1 succeeds. Read the
+  recap, not the exit code. Either trust pve2's host key in CT 800 or drop pve2
+  from the controller's inventory now that pve2 belongs to
+  `school-services-infra`.
 
 ## Incoming — network rebuild, roughly October 2026
 
