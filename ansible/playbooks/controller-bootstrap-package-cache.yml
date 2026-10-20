@@ -27,8 +27,10 @@
 #   ...  -e cyberlab_cache_seed_nic=false      # build without the prov0 foot
 #   ...  -e cyberlab_cache_ctid=802            # second node
 #
-# Off by default in install-cyberlab.sh, the same way
-# cyberlab_sdn_build_sections is, until it is proven.
+# Runs only for a package cache build: `proxmox.package_cache` in the
+# environment file. install-cyberlab.sh reads the same key, and template
+# finalize reads it to decide whether images ship a proxy line, so one key
+# decides all three and they cannot disagree.
 
 - name: Bootstrap the Cyberlab package cache
   hosts: proxmox_targets
@@ -108,6 +110,19 @@
     - name: End the play on nodes that do not run this environment
       ansible.builtin.meta: end_host
       when: inventory_hostname not in cyberlab_nodes
+
+    # A hard stop rather than a quiet skip: whoever ran this by hand asked for
+    # a cache, and building one would leave a cache no template points at.
+    - name: Require the environment to declare a package cache build
+      ansible.builtin.assert:
+        that:
+          - environment_data.environment.proxmox.package_cache | default(false) | bool
+        fail_msg: >-
+          {{ environment_file }} declares a minimalist build
+          (proxmox.package_cache is not true), so templates built for it ship
+          with no proxy line and a cache here would sit unused. Set
+          package_cache: true in the environment file to make this a cache
+          build.
 
     - name: Require the cache VMID to sit in the reserved infrastructure range
       ansible.builtin.assert:

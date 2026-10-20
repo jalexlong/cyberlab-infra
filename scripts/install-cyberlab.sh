@@ -26,6 +26,9 @@ readonly CONTROLLER_FIREWALL_PLAYBOOK="playbooks/controller-bootstrap-firewall.y
 readonly CONTROLLER_ISOLATION_PLAYBOOK="playbooks/controller-assert-isolation.yml"
 readonly DETECT_CONTROLLER_NETWORK_SCRIPT_REL="scripts/detect-controller-network.sh"
 readonly CONTROLLER_NETWORK_VARS_REL="private/generated/controller-network.yml"
+# The same environment every playbook's cyberlab_env defaults to. It declares
+# the build type, so the installer reads it rather than keeping its own switch.
+readonly ENVIRONMENT_FILE_REL="data/environments/school-lab.yml"
 readonly CONTROLLER_CTID_DEFAULT="800"
 readonly REPO_URL_DEFAULT="https://github.com/jalexlong/cyberlab-infra.git"
 readonly REPO_BRANCH_DEFAULT="main"
@@ -40,8 +43,12 @@ SKIP_NETWORK_DETECT="${CYBERLAB_SKIP_NETWORK_DETECT:-0}"
 ROTATE_API_TOKEN="${CYBERLAB_ROTATE_API_TOKEN:-0}"
 SKIP_CONTROLLER_VALIDATE="${CYBERLAB_SKIP_CONTROLLER_VALIDATE:-0}"
 SKIP_SDN_BOOTSTRAP="${CYBERLAB_SKIP_SDN_BOOTSTRAP:-0}"
-# Opt-in, not opt-out. The package cache is Phase 2.5 work and is off until it
-# is proven on the target hardware, the same way section VNets are.
+# Not a switch. Whether this host gets the package cache is the build type, and
+# the environment file declares that (proxmox.package_cache), because template
+# finalize reads the same key to decide whether images ship a proxy line. Two
+# switches could disagree, leaving a cache no image uses or images pointing at a
+# cache that does not exist. Passing the flag now only asserts that the
+# environment declares a cache build; resolve_package_cache sets the real value.
 WITH_PACKAGE_CACHE="${CYBERLAB_WITH_PACKAGE_CACHE:-0}"
 # Opt-in for the same reason the package cache is, plus one of its own: this
 # writes a default-deny firewall to a live host. It is off until an operator
@@ -67,7 +74,8 @@ Options:
   --skip-network-detect       Do not run scripts/detect-controller-network.sh
   --skip-controller-validate  Do not run controller API validation playbook
   --skip-sdn-bootstrap        Do not run controller SDN bootstrap playbook
-  --with-package-cache        Build the apt-cacher-ng package cache LXC (off by default)
+  --with-package-cache        Require the environment to declare a package cache build
+                              (proxmox.package_cache in ${ENVIRONMENT_FILE_REL} decides)
   --with-firewall             Write the isolation firewall and assert it (off by default)
   --rotate-api-token          Force recreation of the Proxmox API token and rewrite controller secret
   -q, --quiet                 Reduce status output
@@ -281,6 +289,7 @@ install_host_prereqs() {
     git \
     python3 \
     python3-apt \
+    python3-yaml \
     sudo
 }
 
@@ -332,6 +341,38 @@ assert_repo_layout() {
   assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_FIREWALL_PLAYBOOK}"
   assert_file "${REPO_DIR}/${ANSIBLE_DIR_REL}/${CONTROLLER_ISOLATION_PLAYBOOK}"
   assert_file "${REPO_DIR}/${DETECT_CONTROLLER_NETWORK_SCRIPT_REL}"
+  assert_file "${REPO_DIR}/${ENVIRONMENT_FILE_REL}"
+}
+
+# Read the build type from the environment file. Runs before any playbook, so a
+# flag that contradicts the environment fails before anything is built.
+# Truthiness follows Ansible's `bool` filter, which is what finalize applies to
+# the same key.
+resolve_package_cache() {
+  local env_file="${REPO_DIR}/${ENVIRONMENT_FILE_REL}"
+  local declared
+
+  declared="$(python3 - "${env_file}" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1]) as handle:
+    environment = yaml.safe_load(handle)["environment"]
+value = (environment.get("proxmox") or {}).get("package_cache", False)
+print(1 if str(value).lower() in ("true", "yes", "on", "1") else 0)
+PY
+)" || fail "Could not read proxmox.package_cache from ${env_file}."
+
+  if [[ "${WITH_PACKAGE_CACHE}" == "1" && "${declared}" != "1" ]]; then
+    fail "--with-package-cache was passed, but ${ENVIRONMENT_FILE_REL} declares a minimalist build (proxmox.package_cache is not true). Templates built for it ship no proxy line, so a cache would sit unused. Set package_cache: true there, or drop the flag."
+  fi
+
+  WITH_PACKAGE_CACHE="${declared}"
+  if [[ "${WITH_PACKAGE_CACHE}" == "1" ]]; then
+    log "Build type: package cache (${ENVIRONMENT_FILE_REL})"
+  else
+    log "Build type: minimalist (${ENVIRONMENT_FILE_REL})"
+  fi
 }
 
 ensure_detector_executable() {
@@ -415,11 +456,12 @@ run_controller_sdn_bootstrap() {
   run_controller_playbook "${CONTROLLER_SDN_PLAYBOOK}"
 }
 
-# Opt-in. Depends on svc0, which controller-bootstrap-sdn.yml always builds as
-# an infrastructure network, so this must run after it rather than beside it.
+# Decided by the environment file, via resolve_package_cache. Depends on svc0,
+# which controller-bootstrap-sdn.yml always builds as an infrastructure network,
+# so this must run after it rather than beside it.
 run_controller_package_cache() {
   if [[ "${WITH_PACKAGE_CACHE}" != "1" ]]; then
-    log "Skipping package cache build (pass --with-package-cache to enable)"
+    log "Skipping package cache build (${ENVIRONMENT_FILE_REL} declares a minimalist build)"
     return 0
   fi
 
@@ -516,6 +558,7 @@ main() {
   resolve_repo_dir
   clone_or_update_repo
   assert_repo_layout
+  resolve_package_cache
   run_controller_network_detection
   show_runtime_summary
   run_host_bootstrap
