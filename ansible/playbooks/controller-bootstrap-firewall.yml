@@ -90,6 +90,9 @@
     # fresh SSH connection and reaching the web UI from where it runs.
     deadman_minutes: 10
     rollback_dir: /root/cyberlab-fw-rollback
+    # Policy is rendered here, then installed into pmxcfs by
+    # "Install the staged host and datacenter policy". See that task for why.
+    fw_staging_dir: /root/cyberlab-fw-staging
 
     infra_subnets: "{{ proxmox_sdn.subnets | default([]) }}"
     prov_subnet: >-
@@ -382,21 +385,16 @@
     # this playbook and a locked-out host -- but the cost of the ordering is
     # zero and the cost of being wrong is a drive to the server room.
     # ---------------------------------------------------------------------
+    - name: Create the firewall staging directory
+      ansible.builtin.file:
+        path: "{{ fw_staging_dir }}"
+        state: directory
+        mode: "0700"
+
     - name: Write the host firewall policy
       ansible.builtin.copy:
-        dest: "/etc/pve/nodes/{{ node_name }}/host.fw"
-        owner: root
-        group: www-data
-        mode: "0640"
-        # In place, not via a temp file and a rename. pmxcfs refuses a chmod
-        # to any mode it does not support, and Ansible's atomic write gives its
-        # temp file 0600 before renaming it over the target -- so writing a NEW
-        # file, or changing one in /etc/pve/firewall, failed with EPERM.
-        # Measured 2026-10-20: the first new lab guest since 08-18 could not
-        # get a .fw at all. Nothing is lost: pmxcfs commits a file to its
-        # database as one unit on close, which is the atomicity the rename
-        # would have bought.
-        unsafe_writes: true
+        dest: "{{ fw_staging_dir }}/host.fw"
+        mode: "0600"
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
@@ -513,11 +511,8 @@
 
     - name: Write the datacenter firewall policy
       ansible.builtin.copy:
-        dest: /etc/pve/firewall/cluster.fw
-        owner: root
-        group: www-data
-        mode: "0640"
-        unsafe_writes: true  # pmxcfs; see "Write the host firewall policy"
+        dest: "{{ fw_staging_dir }}/cluster.fw"
+        mode: "0600"
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
@@ -567,6 +562,39 @@
           # from every lab guest, which is a live data-exfiltration channel.
           # The explicit apt proxy removes any need for guest DNS, so this is
           # refused outright rather than left as the one hole in a default-deny.
+
+    # Staged, then installed with `cat >`, because no Ansible file module can
+    # write into pmxcfs reliably. pmxcfs refuses a chmod to any mode it does
+    # not support, and `copy` gives its temp file 0600 on the way in -- so
+    # writing a NEW file, or changing one in /etc/pve/firewall, failed with
+    # EPERM (measured 2026-10-20: the first new lab guest since 08-18 could not
+    # get a .fw at all). `unsafe_writes` does not help; its fallback copies the
+    # same mode. `cat >` writes content and nothing else, and pmxcfs sets the
+    # ownership and mode itself. Nothing is lost by skipping the rename:
+    # pmxcfs commits a file to its database as one unit on close.
+    #
+    # Compared against the live file rather than the staged one, so a hand
+    # edit in /etc/pve is put back and reported as a change.
+    #
+    # host.fw first, for the reason given above "Write the host firewall
+    # policy": cluster.fw is what switches enforcement on.
+    - name: Install the staged host and datacenter policy
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          if cmp -s "{{ fw_staging_dir }}/{{ item.0 }}" "{{ item.1 }}"; then
+            echo unchanged
+          else
+            cat "{{ fw_staging_dir }}/{{ item.0 }}" > "{{ item.1 }}"
+            echo written
+          fi
+      loop:
+        - ["host.fw", "/etc/pve/nodes/{{ node_name }}/host.fw"]
+        - ["cluster.fw", "/etc/pve/firewall/cluster.fw"]
+      loop_control:
+        label: "{{ item.1 }}"
+      register: fw_install
+      changed_when: "'written' in fw_install.stdout"
 
     # ---------------------------------------------------------------------
     # Per-guest policy.
@@ -634,11 +662,8 @@
 
     - name: Write the per-guest firewall policy
       ansible.builtin.copy:
-        dest: "/etc/pve/firewall/{{ item.0 }}.fw"
-        owner: root
-        group: www-data
-        mode: "0640"
-        unsafe_writes: true  # pmxcfs; see "Write the host firewall policy"
+        dest: "{{ fw_staging_dir }}/{{ item.0 }}.fw"
+        mode: "0600"
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
@@ -670,6 +695,24 @@
             | selectattr('vnet', 'equalto', vnet_name)
             | map(attribute='subnet') | first
           }}
+      when: cyberlab_firewall_manage_guests | bool
+
+    # Same staging and install as host.fw and cluster.fw, and for the same
+    # reason. Before the NIC flag below, so a guest is never filtering on a
+    # policy file that is not there yet.
+    - name: Install the staged per-guest policy
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          if cmp -s "{{ fw_staging_dir }}/{{ item }}.fw" "/etc/pve/firewall/{{ item }}.fw"; then
+            echo unchanged
+          else
+            cat "{{ fw_staging_dir }}/{{ item }}.fw" > "/etc/pve/firewall/{{ item }}.fw"
+            echo written
+          fi
+      loop: "{{ lab_nics | default([]) | map(attribute=0) | unique | list }}"
+      register: fw_guest_install
+      changed_when: "'written' in fw_guest_install.stdout"
       when: cyberlab_firewall_manage_guests | bool
 
     # `firewall=1` is set by REWRITING THE WHOLE NIC LINE, existing MAC
