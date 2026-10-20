@@ -444,6 +444,16 @@
           # factory-time infrastructure, not a student-facing network. Section
           # VNets get no DNS at all -- see the cluster.fw note on port 53.
           IN ACCEPT -source dc/provnet -p udp -dport 53 -log nolog
+
+          # And the host must reach the build guest: finalize SSHes from the
+          # node into it, and clone validation pings it. Without these the
+          # pipeline cannot run at all -- measured 2026-10-20, the first build
+          # since the firewall went on 2026-08-07, when finalize timed out on
+          # port 22 with the guest up and the drop counter climbing. Scoped to
+          # prov0 and its subnet, so the host still initiates nothing onto a
+          # section or service VNet.
+          OUT ACCEPT -i prov0 -dest dc/provnet -p tcp -dport 22 -log nolog # template finalize
+          OUT ACCEPT -i prov0 -dest dc/provnet -p icmp -log nolog # template clone validation
           {% if cyberlab_host_egress | bool and uplink_iface %}
 
           # ---------------------------------------------------------------
