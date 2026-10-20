@@ -388,6 +388,15 @@
         owner: root
         group: www-data
         mode: "0640"
+        # In place, not via a temp file and a rename. pmxcfs refuses a chmod
+        # to any mode it does not support, and Ansible's atomic write gives its
+        # temp file 0600 before renaming it over the target -- so writing a NEW
+        # file, or changing one in /etc/pve/firewall, failed with EPERM.
+        # Measured 2026-10-20: the first new lab guest since 08-18 could not
+        # get a .fw at all. Nothing is lost: pmxcfs commits a file to its
+        # database as one unit on close, which is the atomicity the rename
+        # would have bought.
+        unsafe_writes: true
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
@@ -508,6 +517,7 @@
         owner: root
         group: www-data
         mode: "0640"
+        unsafe_writes: true  # pmxcfs; see "Write the host firewall policy"
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
@@ -628,6 +638,7 @@
         owner: root
         group: www-data
         mode: "0640"
+        unsafe_writes: true  # pmxcfs; see "Write the host firewall policy"
         content: |
           # Managed by controller-bootstrap-firewall.yml. Do not edit by hand.
           #
