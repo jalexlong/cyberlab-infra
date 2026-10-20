@@ -14,6 +14,22 @@
     finalize_ssh_user: cyberlab
     finalize_probe_subnet: 10.30.0
 
+    # Which build type the template belongs to. See `package_cache` in the
+    # environment file: a cache build is seeded through the cache and ships
+    # pointing at it, a minimalist build touches neither. A template whose
+    # target_node this environment does not run (pve2's) is always minimalist.
+    cyberlab_env: school-lab
+    repo_root: "{{ playbook_dir }}/../.."
+    environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"
+    environment_data: "{{ lookup('file', environment_file) | from_yaml }}"
+    cyberlab_nodes: >-
+      {{
+        ([environment_data.environment.proxmox.default_node]
+         + (environment_data.environment.sections | default({})).values()
+           | map(attribute='proxmox_node') | list)
+        | unique | list
+      }}
+
   tasks:
     - name: Resolve selected template name
       ansible.builtin.set_fact:
@@ -66,6 +82,14 @@
     - name: End play on nodes this template does not target
       ansible.builtin.meta: end_host
       when: template_def.target_node != inventory_hostname
+
+    - name: Decide whether this template is a package cache build
+      ansible.builtin.set_fact:
+        finalize_package_cache: >-
+          {{
+            (environment_data.environment.proxmox.package_cache | default(false) | bool)
+            and template_def.target_node in cyberlab_nodes
+          }}
 
     - name: Resolve the finalize SSH private key for this node
       ansible.builtin.set_fact:
@@ -294,6 +318,52 @@
         Acquire::ForceIPv4 "true";
         APT
 
+        PACKAGE_CACHE="{{ finalize_package_cache | bool | ternary('1', '0') }}"
+        SOURCES=/etc/apt/sources.list.d/debian.sources
+
+        # A cache build needs two changes, and neither works alone (measured
+        # 2026-08-07). The proxy line is the obvious one. The other is the
+        # sources: the Debian 13 cloud image points at
+        # mirror+file:///etc/apt/mirrors/*.list, which resolve to
+        # https://deb.debian.org, and apt-cacher-ng answers https with
+        # `403 CONNECT denied` -- a tunnel it could not cache anyway. With the
+        # proxy set and those sources left alone, apt-get update fails outright.
+        #
+        # Plain http is not a downgrade: packages are GPG-signed and apt checks
+        # the signature whatever the transport.
+        #
+        # The concrete host also has to replace the mirror+file indirection,
+        # not just the scheme inside it: generate_mirrorlists in cloud-init
+        # rewrites /etc/apt/mirrors/*.list back to https on the first boot of every
+        # clone. It leaves debian.sources alone (preserve_sources_list), so
+        # sources that never consult those lists keep the rewrite.
+        if [ "${PACKAGE_CACHE}" = "1" ]; then
+          if [ ! -f "${SOURCES}" ]; then
+            echo "Package cache build, but ${SOURCES} does not exist." >&2
+            echo "Only the Debian deb822 layout is rewritten; refusing to ship a" >&2
+            echo "proxy line in front of sources it cannot reach." >&2
+            exit 92
+          fi
+          sed -i \
+            -e 's#mirror+file:///etc/apt/mirrors/debian\.list#http://deb.debian.org/debian#' \
+            -e 's#mirror+file:///etc/apt/mirrors/debian-security\.list#http://deb.debian.org/debian-security#' \
+            -e 's#https://deb\.debian\.org/#http://deb.debian.org/#' \
+            "${SOURCES}"
+          if grep -Eq 'mirror\+file|https://' "${SOURCES}"; then
+            echo "Sources still hold https or mirror+file after the rewrite:" >&2
+            cat "${SOURCES}" >&2
+            exit 93
+          fi
+
+          # The build itself goes through the prov0 address of the cache, which is
+          # what seeds the cache with exactly the packages templates install.
+          # The guest is on prov0 and cannot count on reaching svc0, so the
+          # shipped address is written separately below, after every apt-get.
+          cat > /etc/apt/apt.conf.d/99cyberlab-build-proxy <<'APT'
+        Acquire::http::Proxy "http://{{ cyberlab_cache_prov_ip }}:{{ cyberlab_cache_port }}";
+        APT
+        fi
+
         apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 update
         apt-get -o Acquire::ForceIPv4=true -o DPkg::Lock::Timeout=300 install -y qemu-guest-agent cloud-init sudo curl
 
@@ -323,9 +393,19 @@
         rm -f /home/{{ finalize_ssh_user }}/.bash_history
 
         rm -f /etc/apt/apt.conf.d/99cyberlab-force-ipv4
+        rm -f /etc/apt/apt.conf.d/99cyberlab-build-proxy
         rm -f /etc/systemd/resolved.conf.d/cyberlab.conf
         rm -f /etc/resolv.conf
         ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || true
+
+        # The address lab guests will use, written last so nothing in this
+        # build ever tried it. It fails closed: an unreachable cache makes apt
+        # error rather than quietly reach for the internet.
+        if [ "${PACKAGE_CACHE}" = "1" ]; then
+          cat > /etc/apt/apt.conf.d/90cyberlab-package-cache <<'APT'
+        Acquire::http::Proxy "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}";
+        APT
+        fi
 
         sync
         EOF
@@ -385,6 +465,37 @@
           that net.ipv4.ip_forward is 1 on the host.
       when: template_def.agent_enabled | default(false) | bool
 
+    # Same reasoning as the agent check: this is the last moment the image can
+    # be read. Checks both directions, because the failure that matters for a
+    # minimalist build is a proxy line that should not be there.
+    - name: Verify the template's apt configuration matches its build type
+      ansible.builtin.shell: |
+        ssh -i {{ finalize_ssh_private_key }} \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          {{ finalize_ssh_user }}@{{ template_guest_ip }} \
+          'sudo bash -s' <<'EOF'
+        set -euo pipefail
+        PROXIES="$(apt-config dump | grep -i '^Acquire::http::Proxy ' || true)"
+        echo "proxies: ${PROXIES:-none}"
+        if [ "{{ finalize_package_cache | bool | ternary('1', '0') }}" = "1" ]; then
+          [ "${PROXIES}" = 'Acquire::http::Proxy "http://{{ cyberlab_cache_svc_ip }}:{{ cyberlab_cache_port }}";' ] \
+            || { echo "WRONG-PROXY"; exit 94; }
+          ! grep -Eq 'mirror\+file|https://' /etc/apt/sources.list.d/debian.sources \
+            || { echo "HTTPS-SOURCES"; exit 95; }
+        else
+          [ -z "${PROXIES}" ] || { echo "UNEXPECTED-PROXY"; exit 96; }
+        fi
+        echo "APT-CONFIG-VERIFIED"
+        EOF
+      args:
+        executable: /bin/bash
+      register: guest_apt_verify
+      changed_when: false
+      failed_when: >-
+        guest_apt_verify.rc != 0
+        or 'APT-CONFIG-VERIFIED' not in guest_apt_verify.stdout
+
     - name: Shut down guest
       ansible.builtin.command:
         argv:
@@ -431,6 +542,11 @@
           - "template_name={{ template_def.name }}"
           - "vmid={{ template_def.vmid }}"
           - "guest_ip={{ template_guest_ip }}"
+          - >-
+            package_cache={{
+              (cyberlab_cache_svc_ip ~ ':' ~ cyberlab_cache_port)
+              if finalize_package_cache | bool else 'none (minimalist build)'
+            }}
           - "finalized=true"
           - "vm_stopped=true"
           - "next_step=controller-promote-template.yml"

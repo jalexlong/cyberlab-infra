@@ -64,10 +64,9 @@
     # below for why that separation is the single most dangerous thing here.
     cyberlab_firewall_manage_guests: true
 
-    # The package cache carve-out. Must match controller-bootstrap-package-cache.yml,
-    # which is where this address is assigned.
-    cyberlab_cache_svc_ip: 10.31.0.10
-    cyberlab_cache_port: 3142
+    # The package cache carve-out reads cyberlab_cache_svc_ip and
+    # cyberlab_cache_port from group_vars/all.yml, the one copy every playbook
+    # and the baked-in template proxy line share.
 
     repo_root: "{{ playbook_dir }}/../.."
     environment_file: "{{ repo_root }}/data/environments/{{ cyberlab_env }}.yml"

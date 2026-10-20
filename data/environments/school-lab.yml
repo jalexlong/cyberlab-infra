@@ -16,6 +16,14 @@ environment:
       - "10.64.62.0/23"
       - "10.60.0.0/22"
 
+    # Which of the two build types this is. True means the node runs the
+    # apt-cacher-ng cache (install-cyberlab.sh --with-package-cache), so
+    # template images are built through it and ship pointing at it. Absent or
+    # false is the minimalist build: images keep Debian's stock sources and
+    # carry no proxy, because a proxy line naming a cache that does not exist
+    # breaks apt in every guest. Read by controller-finalize-template-vm.yml.
+    package_cache: true
+
   sections:
     jlong-icsa1:
       proxmox_node: "pve1"

@@ -49,21 +49,21 @@
     cyberlab_cache_storage: local-lvm
     cyberlab_cache_ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
 
+    # The addresses themselves -- cyberlab_cache_svc_ip, cyberlab_cache_prov_ip
+    # and cyberlab_cache_port -- live in group_vars/all.yml, because template
+    # images bake them in and the firewall carves them out.
+
     # net0, permanent. Static rather than DHCP: lab guests carry this address
     # baked into an apt proxy line, so it must not move.
     cyberlab_cache_svc_vnet: svc0
-    cyberlab_cache_svc_ip: 10.31.0.10
     cyberlab_cache_svc_cidr: 24
 
     # net1, factory-time only. Holds the default route, because svc0
     # deliberately has none.
     cyberlab_cache_seed_nic: true
     cyberlab_cache_prov_vnet: prov0
-    cyberlab_cache_prov_ip: 10.30.0.20
     cyberlab_cache_prov_cidr: 24
     cyberlab_cache_prov_gw: 10.30.0.1
-
-    cyberlab_cache_port: 3142
 
     # Return routes to the classroom subnets, via the svc0 gateway on the host.
     #

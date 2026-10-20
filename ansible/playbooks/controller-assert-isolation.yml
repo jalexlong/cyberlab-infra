@@ -46,8 +46,7 @@
     cyberlab_probe_vmid: ""
     cyberlab_probe_peer_ip: ""
 
-    cyberlab_cache_svc_ip: 10.31.0.10
-    cyberlab_cache_port: 3142
+    # cyberlab_cache_svc_ip and cyberlab_cache_port come from group_vars/all.yml.
     # Must match controller-bootstrap-package-cache.yml, which is where the
     # container and its return routes are actually created.
     cyberlab_cache_ctid: 801

@@ -9,3 +9,15 @@ sections_file: "/home/jlong/cyberlab-infra/data/sections.yml"
 slots_file: "/home/jlong/cyberlab-infra/data/slots.yml"
 policy_file: "/home/jlong/cyberlab-infra/data/policy.yml"
 generated_students_file: "/home/jlong/cyberlab-infra/private/generated/students.yml"
+
+# The package cache's addresses. Shared by the cache, firewall, isolation and
+# template finalize playbooks, which each carried their own copy until the
+# template images started depending on them -- a baked-in proxy address that
+# disagreed with the firewall carve-out would fail in the classroom, not here.
+#
+# The cache is dual-homed and the two addresses serve different eras:
+#   svc0  cyberlab_cache_svc_ip   what lab guests use, forever
+#   prov0 cyberlab_cache_prov_ip  factory-time seeding NIC, stripped before shipping
+cyberlab_cache_svc_ip: 10.31.0.10
+cyberlab_cache_prov_ip: 10.30.0.20
+cyberlab_cache_port: 3142
