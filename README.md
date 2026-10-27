@@ -158,6 +158,7 @@ cyberlab-infra/
 │   ├── bootstrap-checklist.md
 │   ├── controller-lxc.md
 │   ├── data-model.md
+│   ├── identity-provider-plan.md # Keycloak for teachers and Proxmox: a plan
 │   ├── network-isolation.md    # egress suppression and firewall design
 │   ├── platform-pipeline.md
 │   ├── recovery.md

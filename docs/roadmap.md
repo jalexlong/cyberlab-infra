@@ -649,7 +649,7 @@ block."
 
 | Layer | Component | License | Responsibility |
 |---|---|---|---|
-| Identity | Guacamole DB auth day one; Keycloak/Authentik later | Apache 2.0 / MIT | Who is this person |
+| Identity | **Keycloak on `pve1`** for teachers and the administrator (Proxmox, then Guacamole), required; Guacamole DB auth for students for now | Apache 2.0 | Who is this person |
 | Authorization | **Control plane (ours)** | Ours | Policy and quotas |
 | Connection broker | Apache Guacamole | Apache 2.0 | Which consoles are reachable now |
 | Hypervisor | Proxmox VE | AGPLv3 | Runs workloads; one service account |
@@ -702,21 +702,28 @@ Format stays `<display_section>-<codename>-<nn>`, e.g. `cyba3-heron-47`.
   Enforced by `tests/test_no_student_pii.py`, which runs in CI on every push
   and PR.
 
-#### Identity provider is deferred, not designed out
+#### Identity provider — decided 2026-10-27: Keycloak, required
 
-Guacamole's OIDC extension provides *authentication only* — it must be layered
-on top of the database auth extension, which is what actually holds users,
-connections, and permissions. The DB extension is required either way, so
-building the control plane against Guacamole's REST API and DB auth now makes a
-later Keycloak addition a drop-in (a JAR in `extensions/` plus config) rather
-than a refactor.
+**Superseded deferral.** Until 2026-10-27 this section deferred an identity
+provider until a district required federation, for two reasons: Keycloak is
+a JVM app wanting ~2 GB, real money on a 16-32 GB node; and OIDC pushes hard
+toward HTTPS, colliding with the unresolved offline-certificate problem
+above.
 
-Reasons to hold off at pilot scale: Keycloak is a JVM app wanting ~2 GB, which
-is real money on a 16-32 GB node; and OIDC pushes hard toward HTTPS, colliding
-with the unresolved offline-certificate problem above. For one classroom, 30
-students, and no district SSO requirement, Guacamole's own DB auth is
-sufficient. **Add the IdP when a district requires federation — a selling
-milestone, not a pilot one.**
+**Decided by the administrator, 2026-10-27:** Keycloak is the main way
+teachers and the administrator sign in to the cyberlab's infrastructure,
+**required on every install**, not an option. It runs in an unprivileged LXC
+without Docker, which keeps its RAM small enough for an appliance; its
+certificate is a public one, issued through Cloudflare's DNS, and students
+stay on Guacamole DB auth for now. It is the cyberlab's own server, separate from
+`pve2`'s (which is public, through tunnels, for school services); this one is
+internal only. Design and order of work: `docs/identity-provider-plan.md`.
+
+What still holds: Guacamole's OIDC extension provides *authentication only*
+and layers on the database auth extension, which holds users, connections
+and permissions. Building the control plane against Guacamole's REST API and
+DB auth stays right; Keycloak in front of it is a JAR in `extensions/` plus
+config.
 
 #### Console delivery
 
